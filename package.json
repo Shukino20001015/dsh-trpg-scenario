@@ -1,6 +1,6 @@
 {
   "name": "dsh-trpg-scenario",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI 跑团剧本加载器：导入剧本包、开局、评分",
   "type": "module",
   "exports": {
@@ -8,7 +8,17 @@
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
-  "files": ["index.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md"],
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "license": "MIT"
 }

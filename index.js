@@ -127,6 +127,11 @@ export function apply(ctx, config = {}) {
     return ok(`已删除：${nm}`)
   }
 
+  function nextSessionId(kind) {
+    const rand = Math.random().toString(36).slice(2, 8)
+    return `trpg-${kind}-${Date.now().toString(36)}-${rand}`
+  }
+
   async function cmdPlay(rawName) {
     const nm = rawName.trim()
     if (!nm) return err('用法：/trpg play <名称>')
@@ -139,6 +144,7 @@ export function apply(ctx, config = {}) {
     }
 
     const handle = await ctx.agents.create({
+      sessionId: nextSessionId('play'),
       agentOptions: { provider: config.provider, model: config.model },
       setup(agentCtx) {
         agentCtx.systemPrompt.section({
@@ -175,6 +181,7 @@ export function apply(ctx, config = {}) {
     }
 
     await ctx.agents.create({
+      sessionId: nextSessionId('judge'),
       agentOptions: { provider: config.provider, model: config.model },
       setup(agentCtx) {
         agentCtx.systemPrompt.section({ name: 'trpg/judge', order: 100, text: sc.judge })
