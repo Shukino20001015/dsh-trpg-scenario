@@ -159,32 +159,37 @@ export function apply(ctx, config = {}) {
     } catch {
       return err(`剧本 ${nm} 不存在或缺少文件，先 /trpg list 看看。`)
     }
+    if (!agent?.session?.append) return err('当前会话不可用，先在一个会话里再点开一局。')
 
-    if (!agent?.session?.append) return err('当前会话不可用。')
+    // 摘掉这个 agent 的全部工具：游玩只需要说话，不需要 bash / read / 编码工具。
+    // 注意：只对"还没跑过工具调用"的干净会话有效。会话历史里已有 tool_calls 时再摘工具，
+    // 平台会因 role:'tool' 消息找不到对应定义而报 400，所以这里只在工具仍可见时尝试。
+    try {
+      const visible = agent.ctx?.tools?.schemas?.(agent.ctx)
+      if (Array.isArray(visible) && visible.length > 0) {
+        agent.ctx.tools.restrict({ allow: [] })
+      }
+    } catch (e) {
+      ctx.logger?.warn?.('[trpg] restrict 失败：' + String(e?.message ?? e))
+    }
 
-    // 用一条"玩家消息"承载剧本设定：模型一定能读到，且排在历史里最靠前
     const brief = [
-      '【接下来是 AI 跑团的剧本设定，请照此扮演，不要跳出角色】',
+      '【接下来是 AI 跑团的剧本设定。请读完，然后照此扮演。】',
       '',
       sc.system,
       '',
       sc.setting,
       '',
-      `【开场场景】`,
+      '【开场场景】',
       sc.opening,
       '',
-      '【规则】玩家用自然语言说他要做什么，你只描述世界里发生的事和别人的反应，不替玩家决策，不给建议，不列选项。',
-      '',
-      '从现在起，你就是这个世界的叙述者。等玩家开口。',
+      '【你要怎么做】',
+      '你是这场游戏的叙述者。',
+      '- 玩家用自然语言说他要做什么，你就描述世界里发生的事、别人的反应、他能看到听到的细节。',
+      '- 只写叙事正文，100–250 字，写完就停，等玩家下一句。',
+      '- 不替玩家做决定，不给建议，不列选项，不写"你可以……"这类提示。',
+      '- 不要输出思考过程、不要解释你在做什么、不要用 markdown 标题。',
     ].join('\n')
-
-    let turn = 0
-    try {
-      for (const e of agent.session.snapshotEvents?.() ?? []) {
-        const t = e?.data?.turn
-        if (typeof t === 'number' && t > turn) turn = t
-      }
-    } catch {}
 
     agent.session.append(
       'user/message',
