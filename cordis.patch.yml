@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-trpg-scenario
+      name: dsh-trpg-scenario
+      config: {}
