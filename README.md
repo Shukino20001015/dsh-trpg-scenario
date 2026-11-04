@@ -4,11 +4,19 @@ DeepSeek Harness 的 AI 跑团插件：导入剧本包、开局、评分。
 
 ## 装
 
+最快（国内也快，走 npmmirror 镜像）：
+
 ```
-dsh plugin --profile desktop add dsh-trpg-scenario
+dsh plugin --profile <profile> add dsh-trpg-scenario@latest
 ```
 
-或在 DSH 里让 Agent 用 `plugin_manager` 的 `install_bundle` 装本地目录。
+从 GitHub 装（无需 npm）：
+
+```
+dsh plugin --profile <profile> add github:Shukino20001015/dsh-trpg-scenario
+```
+
+注意：desktop profile 不接受 CLI 安装，要在 App 内装，或按 `安装提示词.md` 里的等价做法手工写入 profile。
 
 装完重启 DSH 一次。
 
