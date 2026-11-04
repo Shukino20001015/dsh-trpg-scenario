@@ -132,42 +132,70 @@ export function apply(ctx, config = {}) {
     return `trpg-${kind}-${Date.now().toString(36)}-${rand}`
   }
 
-  async function cmdPlay(rawName) {
-    const nm = rawName.trim()
-    if (!nm) return err('用法：/trpg play <名称>')
-    const dir = join(root, nm)
+  function renderCard(sc) {
+    const m = sc.meta ?? {}
+    const head = [m.title ?? '未命名剧本', m.kind ? `· ${m.kind}` : '', m.minutes ? `· ${m.minutes} 分钟` : '']
+      .filter(Boolean)
+      .join(' ')
+    return [
+      `┌ 开场卡 · ${head}`,
+      `│ ${m.time ?? ''}　${m.place ?? ''}`.trimEnd(),
+      `│ ${sc.opening.trim()}`,
+      `│ ${m.pressure ?? ''}`.trimEnd(),
+      `└ 说你要做什么。没有选项，也没有标准答案。`,
+    ].join('\n')
+  }
+
+  async function cmdPlay(rawName, agent) {
+    let nm = rawName.trim()
+    if (!nm) {
+      const names = await installedNames()
+      if (!names.length) return err('剧本库是空的，先用 /trpg import <zip> 导入。')
+      nm = names[names.length - 1]
+    }
     let sc
     try {
-      sc = await loadScenario(dir)
+      sc = await loadScenario(join(root, nm))
     } catch {
       return err(`剧本 ${nm} 不存在或缺少文件，先 /trpg list 看看。`)
     }
 
-    const handle = await ctx.agents.create({
-      sessionId: nextSessionId('play'),
-      agentOptions: { provider: config.provider, model: config.model },
-      setup(agentCtx) {
-        agentCtx.systemPrompt.section({
-          name: 'trpg/rules',
-          order: 100,
-          text: sc.system,
-        })
-        agentCtx.systemPrompt.section({
-          name: 'trpg/world',
-          order: 110,
-          text: sc.setting,
-        })
-        agentCtx.systemPrompt.section({
-          name: 'trpg/opening',
-          order: 120,
-          text: `【开场场景】\n${sc.opening}`,
-        })
-      },
-    })
+    if (!agent?.session?.append) return err('当前会话不可用。')
 
-    return ok(
-      `已开启剧本「${sc.meta.title ?? nm}」。\n\n开场：\n${sc.opening}\n\n直接说你的第一句话即可开始。`,
+    // 用一条"玩家消息"承载剧本设定：模型一定能读到，且排在历史里最靠前
+    const brief = [
+      '【接下来是 AI 跑团的剧本设定，请照此扮演，不要跳出角色】',
+      '',
+      sc.system,
+      '',
+      sc.setting,
+      '',
+      `【开场场景】`,
+      sc.opening,
+      '',
+      '【规则】玩家用自然语言说他要做什么，你只描述世界里发生的事和别人的反应，不替玩家决策，不给建议，不列选项。',
+      '',
+      '从现在起，你就是这个世界的叙述者。等玩家开口。',
+    ].join('\n')
+
+    let turn = 0
+    try {
+      for (const e of agent.session.snapshotEvents?.() ?? []) {
+        const t = e?.data?.turn
+        if (typeof t === 'number' && t > turn) turn = t
+      }
+    } catch {}
+
+    agent.session.append(
+      'user/message',
+      {
+        content: [{ type: 'text', text: brief }],
+        source: { kind: 'user' },
+      },
+      { surfaceOp: 'append' },
     )
+
+    return ok(renderCard(sc))
   }
 
   async function cmdJudge(rawName) {
@@ -198,7 +226,7 @@ export function apply(ctx, config = {}) {
     name: 'trpg',
     description: 'AI 跑团：列出剧本、导入剧本包、开局、评分',
     input: { hint: 'list | import <zip> | remove <名称> | play <名称> | judge <名称>' },
-    async handler({ rawInput }) {
+    async handler({ agent, rawInput }) {
       const line = String(rawInput ?? '').trim()
       const [sub, ...rest] = line.split(/\s+/)
       const arg = rest.join(' ')
@@ -211,7 +239,7 @@ export function apply(ctx, config = {}) {
         case 'rm':
           return cmdRemove(arg)
         case 'play':
-          return cmdPlay(arg)
+          return cmdPlay(arg, agent)
         case 'judge':
           return cmdJudge(arg)
         default:
