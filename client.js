@@ -143,6 +143,17 @@ function renderMarkdown(h, marked, source) {
       return message || '操作未完成，请重试。'
     }
 
+    async function readViewResponse(response) {
+      const type = response.headers.get('content-type') || ''
+      if (!type.toLowerCase().includes('application/json')) {
+        const error = new Error('跑团服务未就绪或与当前 DSH 版本不兼容，请检查插件是否启用并重启 DSH。')
+        error.trpgService = true
+        throw error
+      }
+      try { return await response.json() }
+      catch { const error = new Error('跑团服务返回的数据无法读取，请重启 DSH 后重试。'); error.trpgService = true; throw error }
+    }
+
     const styles = {
       wrap: {
         margin: '0 auto 10px',
@@ -249,7 +260,7 @@ function renderMarkdown(h, marked, source) {
           pending = true
           try {
             const response = await fetch(`api/trpg.view?sessionId=${encodeURIComponent(props.sessionId)}`, { cache: 'no-store' })
-            const data = await response.json()
+            const data = await readViewResponse(response)
             if (!response.ok) throw new Error('unavailable')
             if (active) setResult({ id: props.sessionId, stage: data.current?.stage || null, unavailable: data.current?.stageUnavailable === true, character: data.current?.character || null, characterUnavailable: data.current?.characterUnavailable === true })
           } catch { if (active) setResult(previous => previous?.id === props.sessionId && (previous.stage || previous.character) ? { id: props.sessionId, stage: null, unavailable: !!previous.stage, character: null, characterUnavailable: !!previous.character } : null) }
@@ -306,7 +317,7 @@ function renderMarkdown(h, marked, source) {
         if (!props?.sessionId) return
         setCurrent(undefined)
         fetch(`api/trpg.view?sessionId=${encodeURIComponent(props.sessionId)}`, { cache: 'no-store' }).then(async res => {
-          const data = await res.json()
+          const data = await readViewResponse(res)
           if (!res.ok) throw new Error(data.error || '读取跑团信息失败')
           if (!live) return
           setCurrent(data.current)
@@ -315,7 +326,7 @@ function renderMarkdown(h, marked, source) {
           if (!Array.isArray(items)) throw new Error('剧本列表格式错误')
           setCatalog(items)
           setSelected(previous => items.some(item => item.id === previous) ? previous : items[0]?.id || '')
-        }).catch(error => { if (live) { setCurrent({ error: error.message }); setNote('') } })
+        }).catch(error => { if (live) { setCurrent({ error: error.message, serviceError: error.trpgService === true }); setNote('') } })
         return () => { live = false }
       }, [props?.sessionId, revision])
       const scenario = catalog.find(item => item.id === selected)
@@ -329,7 +340,7 @@ function renderMarkdown(h, marked, source) {
         setPendingError('')
         Promise.all(JSON.parse(candidateKey).map(async id => {
           const response = await fetch(`api/trpg.view?sessionId=${encodeURIComponent(id)}&pending=1`, { cache: 'no-store', signal: abort.signal })
-          const value = await response.json()
+          const value = await readViewResponse(response)
           if (response.status === 409) return [id, { error: value.error || '原剧本不可用' }]
           if (!response.ok) throw new Error('部分会话无法读取')
           return [id, value.current]
@@ -444,16 +455,17 @@ function renderMarkdown(h, marked, source) {
           const requestedStamp = judgeStampRef.current
           try {
             const res = await fetch(`api/trpg.view?sessionId=${encodeURIComponent(props.sessionId)}&audit=1`, { cache: 'no-store' })
-            const data = await res.json()
+            const data = await readViewResponse(res)
             setNote(judgeStampRef.current === requestedStamp ? (data?.result?.text || data?.error || '核对未完成，请人工复核。') : '会话内容已变化，请在回复完成后重新检查。')
           } catch (error) { setNote(`核对失败：${error.message}`) }
           finally { setBusy(false) }
         } }, '检查评分结果'),
         note ? h('div', { role: 'status', style: { marginTop: 12, fontSize: 13, lineHeight: 1.7, whiteSpace: 'pre-wrap' } }, note) : null)
       if (current) return h('div', { style: styles.wrap, 'data-trpg': 'fixed-opening' },
-        h('div', { style: styles.head }, current.title || '跑团开场'),
+        h('div', { style: styles.head }, current.serviceError ? '跑团服务不可用' : current.title || '跑团开场'),
         current.error ? h(React.Fragment, null,
           h('div', { role: 'alert' }, current.error),
+          current.serviceError ? h('button', { type: 'button', style: btn, onClick: () => setRevision(n => n + 1) }, '重试') : h(React.Fragment, null,
           h('div', { style: styles.hint }, '为避免改变原来的剧本或评分规则，此会话不会强行继续。原记录仍保留；可返回剧本选择，或找组织者恢复原版本。'),
           h('button', { type: 'button', style: btn, disabled: busy, onClick: async () => {
             setBusy(true)
@@ -461,7 +473,7 @@ function renderMarkdown(h, marked, source) {
             catch (error) { setNote(`无法返回剧本选择：${error.message}`) }
             finally { setBusy(false) }
           } }, '返回剧本选择'),
-          note ? h('div', { role: 'alert', style: styles.hint }, note) : null) : h(React.Fragment, null,
+          note ? h('div', { role: 'alert', style: styles.hint }, note) : null)) : h(React.Fragment, null,
           current.versionWarning ? h('div', { role: 'alert', style: { marginTop: 12, padding: '10px 12px', borderRadius: 8, background: 'rgba(190, 125, 30, 0.1)', fontSize: 13, lineHeight: 1.6 } }, current.versionWarning) : null,
           current.player ? h('details', { open: true, style: { marginTop: 12 } },
             h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '剧本背景'),
