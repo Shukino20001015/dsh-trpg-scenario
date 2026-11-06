@@ -41,6 +41,7 @@ export function restoreCharacterState(config, history) {
 
 export function advanceCharacterState(config, history, request, events) {
   const current = restoreCharacterState(config, history)
+  if (current.history.length >= 10000) throw new Error('主角状态历史已达上限，无法继续更新')
   if (!exact(request, ['expectedRevision', 'field', 'value', 'quotes']) || !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision !== current.revision) throw new Error('主角状态申请无效或版本已变化')
   if (!config.fields.some(field => field.id === request.field) || !text(request.value, 240) || request.value === current.values[request.field]) throw new Error('主角状态内容无效或没有变化')
   const evidence = resolveEvidenceQuotes(request.quotes, events)

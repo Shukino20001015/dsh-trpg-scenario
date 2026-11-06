@@ -24,7 +24,7 @@ async function stageDirectory(root, session, hash, create = false) {
 }
 
 async function readJson(path) {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const info = await file.stat()
     if (!info.isFile() || info.size > MAX_ENTRY_BYTES) throw new Error('阶段记录文件无效')
@@ -36,11 +36,13 @@ async function readJson(path) {
 // writers of the same revision cannot overwrite one another; a crash before
 // linking may leave a private temporary file, which is not a committed entry.
 async function publish(dir, name, value, signal) {
+  const bytes = Buffer.from(JSON.stringify(value), 'utf8')
+  if (bytes.length > MAX_ENTRY_BYTES) throw new Error('阶段记录过大')
   const temp = join(dir, `.pending-${randomUUID()}`)
   const file = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
   let committed = false
   try {
-    try { await file.writeFile(JSON.stringify(value)); await file.sync() }
+    try { await file.writeFile(bytes); await file.sync() }
     finally { await file.close() }
     if (signal?.aborted) throw new Error('阶段申请已中止')
     try { await link(temp, join(dir, name)); committed = true }

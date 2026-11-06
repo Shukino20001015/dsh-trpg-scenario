@@ -50,11 +50,13 @@ export function inspectDialogue(buffer, name = '', options = {}) {
   catch { throw new Error(`${name} 不是有效的 UTF-8 日志。`) }
   const lines = source.split(/\r?\n/), dialogue = [], recordIds = [], playerRecordIds = []
   let stagedHistory = null
+  let uncertainToolOutcomes = 0
   if (options.stageGraph) {
     let stagedEvents
     try { stagedEvents = lines.filter(line => line.trim()).map(line => JSON.parse(line)) }
     catch { throw new Error(`${name} 不是有效的 DSH JSONL 日志。`) }
-    try { stagedHistory = options.characterConfig ? deriveCombinedToolHistory(stagedEvents, options.stageGraph, options.characterConfig).stages : deriveStageToolHistory(stagedEvents, options.stageGraph) }
+    const noteUnknown = () => { uncertainToolOutcomes++ }
+    try { stagedHistory = options.characterConfig ? deriveCombinedToolHistory(stagedEvents, options.stageGraph, options.characterConfig, noteUnknown).stages : deriveStageToolHistory(stagedEvents, options.stageGraph, noteUnknown) }
     catch { throw new Error(`${name} 的阶段工具记录不完整或与剧本规则不一致，请人工核对。`) }
   }
   const dialogueHash = createHash('sha256')
@@ -155,7 +157,7 @@ export function inspectDialogue(buffer, name = '', options = {}) {
   if (text.length > MAX_DIALOGUE) throw new Error(`${name} 的对话过长；为避免遗漏证据，本次不会自动截断。`)
   const ids = new Set(completedPlays.map(x => x.id).filter(Boolean))
   if (ids.size > 1) throw new Error(`${name} 包含多个不同剧本的开局记录，请人工核对。`)
-  return { dialogue: text, dialogueFingerprint: dialogueHash.digest('hex'), recordIds, playerRecordIds, interruptedAssistantSeqs, abortedTurns: [...abortedTurns], lastPlayerUnanswered: lastParticipantRole === '玩家', scenarioId: completedPlays.length === 1 ? completedPlays[0].id : null, versionHash: completedPlays.length === 1 ? completedPlays[0].hash : null, playPolicy, ...(stagedHistory ? { stagedTransitionCount: stagedHistory.length } : {}) }
+  return { dialogue: text, dialogueFingerprint: dialogueHash.digest('hex'), recordIds, playerRecordIds, interruptedAssistantSeqs, abortedTurns: [...abortedTurns], lastPlayerUnanswered: lastParticipantRole === '玩家', scenarioId: completedPlays.length === 1 ? completedPlays[0].id : null, versionHash: completedPlays.length === 1 ? completedPlays[0].hash : null, playPolicy, ...(stagedHistory ? { stagedTransitionCount: stagedHistory.length, uncertainToolOutcomes } : {}) }
 }
 
 export function extractDialogue(buffer, name = '') { return inspectDialogue(buffer, name).dialogue }
@@ -170,7 +172,7 @@ export function playerInputsFromJudgeRequest(request, trustedPlayerRecords) {
   const seenGroups = new Set()
   let current = -1
   for (const line of request.split('\n')) {
-    const header = /^【第 ([1-6]) 组；文件名仅供识别：("(?:[^"\\]|\\.)*")】$/.exec(line)
+    const header = /^【第 ([1-6]) (?:组|份游玩记录)；文件名仅供识别：("(?:[^"\\]|\\.)*")】$/.exec(line)
     if (header) {
       const index = Number(header[1]) - 1
       if (index >= groups.length || seenGroups.has(index)) return null

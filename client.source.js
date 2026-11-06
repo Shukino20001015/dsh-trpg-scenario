@@ -81,8 +81,8 @@ window.__ModuleLoader__.load({
       if (!stage || typeof stage.goal !== 'string' || typeof stage.current !== 'string' || !Array.isArray(stage.visited)) return null
       return h('section', { 'aria-label': '剧本目标与阶段', 'aria-live': 'polite', style: { marginTop: 12, padding: '10px 13px', borderRadius: 10, background: 'rgba(80, 110, 160, 0.07)', fontSize: 13, lineHeight: 1.6 } },
         h('div', null, h('strong', null, '总体目标：'), stage.goal),
-        h('div', null, h('strong', null, '当前阶段（已确认）：'), stage.current),
-        h('div', { style: { opacity: 0.7, fontSize: 12 } }, '阶段根据对话确认，可能稍后更新；请以正在发生的剧情为准。'),
+        h('div', null, h('strong', null, '当前记录的阶段：'), stage.current),
+        h('div', { style: { opacity: 0.7, fontSize: 12 } }, '阶段由 AI 根据剧情申请更新，可能延迟或有误；如与剧情不符，可直接告诉主持。'),
         stage.visited.length > 1 ? h('details', null,
           h('summary', { style: { cursor: 'pointer', opacity: 0.8 } }, '已走过的阶段'),
           h('ol', { style: { margin: '6px 0 0', paddingLeft: 20 } }, stage.visited.map((name, i) => h('li', { key: i }, name)))) : null)
@@ -91,11 +91,17 @@ window.__ModuleLoader__.load({
     function CharacterInfo({ character, unavailable = false }) {
       if (unavailable) return h('div', { role: 'status', style: styles.hint }, '主角状态暂不可核对，请以对话为准；发现不一致可直接告诉主持。')
       if (!character || !Array.isArray(character.fields) || !character.fields.length) return null
+      // Preserve the original stored state for replay, but make direction and
+      // line controls visible instead of letting them reorder the card.
+      const controls = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
+      const visible = value => String(value ?? '').replace(controls, ch => `⟦U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟧`)
+      const hasControls = character.fields.some(field => [field.label, field.value].some(value => typeof value === 'string' && /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(value)))
       return h('details', { 'aria-label': '主角状态', style: { marginTop: 8, padding: '10px 13px', borderRadius: 10, background: 'rgba(80, 110, 160, 0.07)', fontSize: 13, lineHeight: 1.6 } },
         h('summary', { style: { cursor: 'pointer', fontWeight: 650 } }, '主角状态'),
         h('div', { style: { opacity: 0.7, fontSize: 12, marginTop: 5 } }, '明显变化时更新；若与对话不符，可以直接告诉主持。'),
+        hasControls ? h('div', { role: 'status', style: { fontSize: 12 } }, '状态包含不可见控制字符，已用字符编号显示；原记录未修改，请核对。') : null,
         h('dl', { style: { margin: '8px 0 0' } }, character.fields.map((field, i) => h('div', { key: i, style: { display: 'flex', gap: 8, marginTop: 4 } },
-          h('dt', { style: { fontWeight: 600 } }, `${field.label}：`), h('dd', { style: { margin: 0 } }, field.value)))))
+          h('dt', { style: { fontWeight: 600 } }, `${visible(field.label)}：`), h('dd', { style: { margin: 0 } }, visible(field.value))))))
     }
 
     // The running conversation normally collapses the operation card. Keep the
@@ -112,8 +118,8 @@ window.__ModuleLoader__.load({
       const [result, setResult] = React.useState(null)
       React.useEffect(() => {
         let active = true, pending = false
-        const refresh = async () => {
-          if (pending || document.visibilityState === 'hidden') return
+        const refresh = async (force = false) => {
+          if (pending || (!force && document.visibilityState === 'hidden')) return
           pending = true
           try {
             const response = await fetch(`api/trpg.view?sessionId=${encodeURIComponent(props.sessionId)}`, { cache: 'no-store' })
@@ -123,9 +129,13 @@ window.__ModuleLoader__.load({
           } catch { if (active) setResult(previous => previous?.id === props.sessionId && (previous.stage || previous.character) ? { id: props.sessionId, stage: null, unavailable: !!previous.stage, character: null, characterUnavailable: !!previous.character } : null) }
           finally { pending = false }
         }
-        refresh()
-        const timer = setInterval(refresh, running ? 1500 : 5000)
-        return () => { active = false; clearInterval(timer) }
+        // Hydrate on mount even if Electron reports the window as hidden;
+        // only recurring polling should be suppressed in the background.
+        refresh(true)
+        const timer = setInterval(() => refresh(), running ? 1500 : 5000)
+        const onVisibilityChange = () => { if (document.visibilityState === 'visible') refresh() }
+        document.addEventListener('visibilitychange', onVisibilityChange)
+        return () => { active = false; clearInterval(timer); document.removeEventListener('visibilitychange', onVisibilityChange) }
       }, [props.sessionId, running, updated])
       if (!result || result.id !== props.sessionId) return null
       return h(React.Fragment, null, h(StageInfo, { stage: result.stage, unavailable: result.unavailable }), h(CharacterInfo, { character: result.character, unavailable: result.characterUnavailable }))
@@ -232,7 +242,7 @@ window.__ModuleLoader__.load({
           if (importedId) setSelected(importedId)
           setNote(result.text)
           setRevision(n => n + 1)
-        } catch (error) { setNote(`导入失败：${readableError(error)}`) }
+        } catch (error) { const message = readableError(error); setNote(message.startsWith('导入失败：') ? message : `导入失败：${message}`) }
         finally { setBusy(false) }
       }, [props?.sessionId])
       const remove = React.useCallback(async () => {
@@ -269,7 +279,7 @@ window.__ModuleLoader__.load({
           if (result.text?.includes('\n注意：')) window.alert(`评分记录需要人工核对：\n\n${result.text}`)
           ctx.uiWorkspace.openSession(judgeSession)
           setNote(result.text)
-        } catch (error) { setNote(`评分准备失败：${readableError(error)}`) }
+        } catch (error) { const message = readableError(error); setNote(message.startsWith('评分准备失败：') ? message : `评分准备失败：${message}`) }
         finally { setBusy(false); setConfirmedComplete(false) }
       }, [props?.sessionId, selected, newSession, confirmedComplete])
       const start = React.useCallback(async () => {
@@ -328,13 +338,13 @@ window.__ModuleLoader__.load({
           current.criteriaUnverified ? null : h(Criteria, { items: current.criteria }),
           h('div', { style: { fontWeight: 600, marginTop: 14 } }, '固定开场'),
           h('div', { 'data-trpg-markdown': 'opening', style: { lineHeight: 1.7 } }, renderMarkdown(h, marked, current.opening)),
-          h('div', { style: styles.hint }, '以上是各组共同的初始场景。请在下方输入你们的第一步行动。'),
+          h('div', { style: styles.hint }, '以上是本剧本的固定开场。请在下方输入第一步行动。'),
           h('button', { type: 'button', style: btn, disabled: busy, onClick: async () => {
             setBusy(true)
             try { ctx.uiWorkspace.openSession(await newSession('AI 跑团 · 选择剧本')) }
             catch (error) { setNote(`无法创建新会话：${error.message}`) }
             finally { setBusy(false) }
-          } }, '另开一组'),
+          } }, '另开一局'),
           note ? h('div', { role: 'alert', style: styles.hint }, note) : null))
       return h(
         'div',
@@ -381,10 +391,10 @@ window.__ModuleLoader__.load({
         h('div', { style: { marginTop: 12, fontSize: 12.5, lineHeight: 1.6 } },
           h('label', null,
             h('input', { type: 'checkbox', checked: confirmedComplete, onChange: e => setConfirmedComplete(e.target.checked), disabled: busy }),
-            ' 我已逐份核对要上传的记录，确认覆盖对应小组整局游玩（可选）')),
-        h('label', { style: { ...btn, display: 'inline-block', marginLeft: 8, opacity: !selected || busy ? 0.5 : 1 } }, '导入各组日志并准备评分',
-          h('input', { type: 'file', accept: '.zip,.jsonl,application/zip', multiple: true, onChange: judgeFiles, disabled: !selected || busy, style: { width: 1, height: 1, opacity: 0, position: 'absolute' }, 'aria-label': '导入各组游玩日志' })),
-        h('div', { style: styles.hint }, '开局与评分分别创建独立会话，沿用当前会话所选模型。评分前请检查日志中的个人信息；AI 评分可能误用证据或给出不合理分数，须由组织者对照原始记录和评分标准复核。'),
+          ' 我已逐份核对上传的记录，确认每份都覆盖对应的整局游玩（可选）')),
+        h('label', { style: { ...btn, display: 'inline-block', marginLeft: 8, opacity: !selected || busy ? 0.5 : 1 } }, '上传对话日志评分',
+          h('input', { type: 'file', accept: '.zip,.jsonl,application/zip', multiple: true, onChange: judgeFiles, disabled: !selected || busy, style: { width: 1, height: 1, opacity: 0, position: 'absolute' }, 'aria-label': '上传对话日志评分' })),
+        h('div', { style: styles.hint }, '每份日志对应一次游玩，可上传一份单独评分，也可上传多份进行比较（最多 6 份）。开局与评分分别创建独立会话，沿用当前会话所选模型。评分前请检查日志中的个人信息；AI 评分可能误用证据或给出不合理分数，须对照原始记录和评分标准复核。'),
         // The card can be taller than its scroll viewport; keep errors and
         // results visible after file upload even when the user is near the top.
         note ? h('div', { role: 'status', 'aria-live': 'polite', style: { position: 'sticky', bottom: 0, zIndex: 2, padding: '9px 12px', borderRadius: 8, border: '1px solid var(--line, #d7dbe0)', background: 'var(--panel, #f7f8fa)', boxShadow: '0 -4px 16px rgba(30, 50, 80, 0.08)', fontSize: 13, lineHeight: 1.6, whiteSpace: 'pre-wrap', marginTop: 8 } }, note) : null,

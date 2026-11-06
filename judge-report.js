@@ -53,7 +53,7 @@ export function auditGroupReports(report, groups, bands) {
   const trustedBands = Object.fromEntries(bands.map(item => [item.name, item.bands]))
   for (const result of report.groups) {
     if (!Number.isSafeInteger(result?.group) || !groups[result.group - 1]) continue
-    for (const issue of auditScores(result, names, { bands: trustedBands, evidence: groups[result.group - 1] })) errors.push(`第 ${result.group} 组：${issue}`)
+    for (const issue of auditScores(result, names, { bands: trustedBands, evidence: groups[result.group - 1] })) errors.push(`${groups.length === 1 ? '本次游玩' : `第 ${result.group} 组`}：${issue}`)
   }
   return errors
 }
@@ -66,9 +66,10 @@ export function playerEvidenceReviewWarnings(report, playerRecords, groupRecords
   const warnings = []
   for (const group of report.groups) {
     if (!Number.isSafeInteger(group?.group) || !Array.isArray(group.dimensions)) continue
+    const label = report.groups.length === 1 && playerRecords.length === 1 && group.group === 1 ? '本次游玩' : `第 ${group.group} 组`
     const players = playerRecords[group.group - 1]
     if (!Array.isArray(players)) {
-      warnings.push(`第 ${group.group} 组：缺少记录角色信息，请自行核对玩家发言与智能体叙述。`)
+      warnings.push(`${label}：缺少记录角色信息，请自行核对玩家发言与智能体叙述。`)
       continue
     }
     let hasMixedEvidence = false, addedHostIntro = false
@@ -84,7 +85,7 @@ export function playerEvidenceReviewWarnings(report, playerRecords, groupRecords
       (i === 0 || Number(allRecords[i - 1].slice(3)) < Number(ref.slice(3))))
     const rolesConsistent = playerSet.size === players.length && players.every(ref => allSet?.has(ref))
     if (Array.isArray(allRecords) && (!ordered || !rolesConsistent)) {
-      warnings.push(`第 ${group.group} 组：记录顺序或角色索引不一致，无法可靠区分玩家和主持记录，请对照原始日志人工核查。`)
+      warnings.push(`${label}：记录顺序或角色索引不一致，无法可靠区分玩家和主持记录，请对照原始日志人工核查。`)
       continue
     }
     if (ordered && rolesConsistent) {
@@ -98,7 +99,7 @@ export function playerEvidenceReviewWarnings(report, playerRecords, groupRecords
       if (!Number.isFinite(item?.score) || typeof item.name !== 'string' || !Array.isArray(item.evidence) || !item.evidence.length) continue
       if (item.evidence.every(ref => typeof ref === 'string' && !players.includes(ref))) {
         const name = safeAuditLabel(item.name)
-        warnings.push(`第 ${group.group} 组：${name}的结构化引用未包含玩家发言，请对照上下文核实是否把智能体叙述误当玩家行动。`)
+        warnings.push(`${label}：${name}的结构化引用未包含玩家发言，请对照上下文核实是否把智能体叙述误当玩家行动。`)
       }
       if (item.evidence.some(ref => typeof ref === 'string' && players.includes(ref)) && item.evidence.some(ref => typeof ref === 'string' && !players.includes(ref))) hasMixedEvidence = true
       // Only label IDs from the trusted dialogue index; do not echo arbitrary
@@ -110,7 +111,7 @@ export function playerEvidenceReviewWarnings(report, playerRecords, groupRecords
         if (hostRefs.length) {
           const displayRefs = refs => refs.length ? refs.slice(0, 15).join('、') + (refs.length > 15 ? `（另有 ${refs.length - 15} 条，请查看结构化引用）` : '') : '无'
           if (!addedHostIntro) {
-            warnings.push(`第 ${group.group} 组：下列维度引用了主持记录。请对照玩家原始输入；主持叙述可证明回应或情节，但不自动证明玩家主动选择。`)
+            warnings.push(`${label}：下列维度引用了主持记录。请对照玩家原始输入；主持叙述可证明回应或情节，但不自动证明玩家主动选择。`)
             addedHostIntro = true
           }
           warnings.push(`  ${safeAuditLabel(item.name)}：玩家 ${displayRefs(validRefs.filter(ref => players.includes(ref)))}；主持 ${displayRefs(hostRefs)}`)
@@ -119,7 +120,7 @@ export function playerEvidenceReviewWarnings(report, playerRecords, groupRecords
         }
       }
     }
-    if (hasMixedEvidence) warnings.push(`第 ${group.group} 组：部分评分同时引用玩家发言和智能体回复；请核对玩家实际授权或作出的行为，不能把主持自行补写的经历或决定当成玩家成果。`)
+    if (hasMixedEvidence) warnings.push(`${label}：部分评分同时引用玩家发言和智能体回复；请核对玩家实际授权或作出的行为，不能把主持自行补写的经历或决定当成玩家成果。`)
   }
   return warnings
 }
@@ -167,7 +168,7 @@ export function playerQuoteReviewWarnings(text, playerInputs) {
       const citedQuotes = playerQuotes(line)
       return citedQuotes.some(match => !inputs[refs[0]].includes(match[1]))
     })
-    if (notInAnyInput || mismatchedSpecificRecord) warnings.push(`第 ${i + 1} 组：报告中有归属于玩家的引文未在该组玩家原始输入中逐字找到；可能是转述、代写或截取差异，请对照上下文人工核对。`)
+    if (notInAnyInput || mismatchedSpecificRecord) warnings.push(`${playerInputs.length === 1 ? '本次游玩' : `第 ${i + 1} 组`}：报告中有归属于玩家的引文未在对应玩家原始输入中逐字找到；可能是转述、代写或截取差异，请对照上下文人工核对。`)
   }
   return warnings
 }
@@ -180,7 +181,7 @@ export function formatAuditedScores(report) {
       const name = safeAuditLabel(item.name)
       return item.score === null ? `  ${name}：无法评定` : `  ${name}：${item.score} 分（${item.band.min}–${item.band.max} 档）`
     })
-    return [`第 ${group.group} 组`, ...lines, `  总分：${group.total == null ? '未给出' : `${group.total} 分`}`].join('\n')
+    return [report.groups.length === 1 ? '本次游玩' : `第 ${group.group} 组`, ...lines, `  总分：${group.total == null ? '未给出' : `${group.total} 分`}`].join('\n')
   }).join('\n\n')
 }
 
@@ -191,6 +192,22 @@ export function completenessReviewWarning(text, confirmedComplete) {
   const withoutJson = text.replace(/```trpg-score-json\s*\n[\s\S]*?\n```/g, '')
   if (!/^\s*(?:[-*>]\s*)?(?:\*\*)?完整性(?:\*\*)?\s*[：:]\s*(?:\*\*)?无法判断/m.test(withoutJson)) return null
   return '组织者已声明逐份核对全程，但报告中有“完整性：无法判断”。请核对报告是否指出具体的截断或冲突证据；声明不等于系统验证，也不应忽略实际异常。'
+}
+
+// A narrow wording cue, not proof of contradiction: an incomplete record
+// may contain an uncited claim about the entire game. Skip quoted examples and
+// code blocks, and never echo the source text in the warning.
+export function coverageClaimReviewWarning(text, confirmedComplete) {
+  if (typeof text !== 'string') return null
+  let fenced = false
+  const body = text.split('\n').map(line => {
+    if (/^\s*```/.test(line)) { fenced = !fenced; return '' }
+    return fenced ? '' : line.replace(/`[^`\n]*`|“[^”\n]*”|「[^」\n]*」/g, '')
+  }).join('\n')
+  // A human declaration is not proof when the report itself raises doubts.
+  if (confirmedComplete === true && !/完整性[^\n]{0,30}(?:无法判断|未确认|不完整|存疑)/.test(body)) return null
+  if (!/(?:全程|整局|从头到尾)(?:都|均|也)?(?:没有|未曾|从未|没(?:有)?)/.test(body)) return null
+  return '记录覆盖全程尚未确认或报告存在疑问，但报告使用了“全程没有”等表述；请核对是否把记录中未见误写成整局未发生。该提示不判断结论真假。'
 }
 
 // Conservative best-effort check for an explicit contradiction observed in
@@ -220,11 +237,11 @@ export function findExplicitTextConflicts(text, report) {
       const heading = headings[0]
       const next = sections.find(section => section.index > heading.index)
       const content = scoped.slice(heading.index + heading[0].length, next?.index ?? scoped.length)
-      if (Number.isFinite(item.score) && /结论\s*[：:]\s*(?:\*\*\s*)?无法评定/.test(content)) warnings.push(`第 ${group.group} 组：${safeAuditLabel(item.name)}在文字结论中写“无法评定”，结构化结果却给出分数`)
+      if (Number.isFinite(item.score) && /结论\s*[：:]\s*(?:\*\*\s*)?无法评定/.test(content)) warnings.push(`${report.groups.length === 1 ? '本次游玩' : `第 ${group.group} 组`}：${safeAuditLabel(item.name)}在文字结论中写“无法评定”，结构化结果却给出分数`)
       // Only match a direct numeric conclusion, not an example or a band range.
       const numeric = /结论\s*[：:]\s*(?:\*\*\s*)?(?:给\s*)?(\d+(?:\.\d+)?)\s*(?:分|\s*\/\s*\d+)/.exec(content)
-      if (numeric && item.score === null) warnings.push(`第 ${group.group} 组：${safeAuditLabel(item.name)}在文字结论中给出分数，结构化结果却写无法评定`)
-      else if (numeric && Number.isFinite(item.score) && Number(numeric[1]) !== item.score) warnings.push(`第 ${group.group} 组：${safeAuditLabel(item.name)}的文字结论与结构化结果分数不同`)
+      if (numeric && item.score === null) warnings.push(`${report.groups.length === 1 ? '本次游玩' : `第 ${group.group} 组`}：${safeAuditLabel(item.name)}在文字结论中给出分数，结构化结果却写无法评定`)
+      else if (numeric && Number.isFinite(item.score) && Number(numeric[1]) !== item.score) warnings.push(`${report.groups.length === 1 ? '本次游玩' : `第 ${group.group} 组`}：${safeAuditLabel(item.name)}的文字结论与结构化结果分数不同`)
     }
   }
   return warnings

@@ -109,6 +109,7 @@ export function restoreStageState(graph, history) {
 
 export function advanceStage(graph, history, request, events) {
   const state = restoreStageState(graph, history)
+  if (state.history.length >= 10000) throw new Error('阶段历史已达上限，无法继续更新')
   const entry = validateTransition(graph, state, request, events)
   return { current: entry.to, revision: entry.revision, history: [...state.history, entry] }
 }

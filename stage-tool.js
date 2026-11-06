@@ -33,7 +33,7 @@ export async function createStageRuntime({ root, hash, graph, agent, resume = fa
         // current tool call, while replay still sends it to the model. Never
         // approve a transition during such a mixed message, even if the
         // quoted evidence happens to match an earlier visible utterance.
-        const latestAssistant = [...agent.session.log].reverse().find(event => event?.type === 'assistant/message' && event.surfaceOp === 'append')
+        const latestAssistant = [...agent.session.log].reverse().find(event => event?.type === 'assistant/message')
         const blocks = latestAssistant?.data?.message?.content
         if (Array.isArray(blocks) && blocks.some(block => block?.type === 'tool-call') && blocks.some(block => block?.type === 'text' && typeof block.text === 'string' && block.text.trim())) throw new Error('工具调用混合隐藏叙述')
         const events = stageDialogueEvidence(agent.session.log)

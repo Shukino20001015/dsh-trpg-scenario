@@ -69,13 +69,13 @@ function scanStageToolHistory(log, onSuccess, onUnknown = () => {}, onCharacter 
 
 // Validate only the structurally confirmed dual-tool history when tracking has
 // already been suspended. Unknown outcomes are never promoted to successes.
-export function deriveCombinedToolHistory(log, graph, config) {
+export function deriveCombinedToolHistory(log, graph, config, onUnknown = () => {}) {
   let stages = [], character = []
   scanStageToolHistory(log, ({ args, evidence, events }) => {
     stages = advanceStage(graph, stages, { transition: args.transition, expectedRevision: args.expectedRevision, evidence }, events).history
-  }, () => {}, ({ args, events }) => {
+  }, () => onUnknown('stage'), ({ args, events }) => {
     character = advanceCharacterState(config, character, args, events).history
-  }, () => {})
+  }, () => onUnknown('character'))
   return { stages, character }
 }
 
@@ -127,10 +127,10 @@ export function interruptedStageRecovery(log, graph, history) {
 // Judge devices have the frozen graph and exported log, but not the play
 // device's private state files. Rebuild only structural transition history;
 // the resulting labels are not proof that events or outcomes are true.
-export function deriveStageToolHistory(log, graph) {
+export function deriveStageToolHistory(log, graph, onUnknown = () => {}) {
   let history = []
   scanStageToolHistory(log, ({ args, evidence, events }) => {
     history = advanceStage(graph, history, { transition: args.transition, expectedRevision: args.expectedRevision, evidence }, events).history
-  })
+  }, () => onUnknown('stage'))
   return history
 }

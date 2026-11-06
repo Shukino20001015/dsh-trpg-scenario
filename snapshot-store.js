@@ -57,7 +57,7 @@ async function snapshotDir(root, create = false) {
 export async function readSnapshot(root, hash) {
   if (!validHash(hash)) throw new Error('快照标识无效。')
   const dir = await snapshotDir(root)
-  const file = await open(join(dir, `${hash}.json`), constants.O_RDONLY | constants.O_NOFOLLOW)
+  const file = await open(join(dir, `${hash}.json`), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const info = await file.stat()
     if (!info.isFile() || info.size > MAX_BYTES) throw new Error('快照大小或类型无效。')

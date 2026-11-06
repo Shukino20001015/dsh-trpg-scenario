@@ -6,6 +6,7 @@ import { advanceCharacterState, restoreCharacterState } from './character-state.
 
 const SESSION = /^session-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const HASH = /^[a-f0-9]{64}$/
+const MAX_ENTRY_BYTES = 16384
 const filename = revision => `${String(revision).padStart(6, '0')}.json`
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === [...keys].sort().join(',')
 const configDigest = config => createHash('sha256').update(JSON.stringify(config)).digest('hex')
@@ -26,20 +27,22 @@ async function characterDirectory(root, session, hash, create = false) {
 }
 
 async function readJson(path) {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const info = await file.stat()
-    if (!info.isFile() || info.size > 16384) throw new Error('主角状态文件无效')
+    if (!info.isFile() || info.size > MAX_ENTRY_BYTES) throw new Error('主角状态文件无效')
     return JSON.parse(await file.readFile('utf8'))
   } finally { await file.close() }
 }
 
 async function publish(dir, name, value, signal) {
+  const bytes = Buffer.from(JSON.stringify(value), 'utf8')
+  if (bytes.length > MAX_ENTRY_BYTES) throw new Error('主角状态记录过大')
   const pending = join(dir, `.pending-${randomUUID()}`)
   const file = await open(pending, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
   let committed = false
   try {
-    try { await file.writeFile(JSON.stringify(value)); await file.sync() } finally { await file.close() }
+    try { await file.writeFile(bytes); await file.sync() } finally { await file.close() }
     if (signal?.aborted) throw new Error('主角状态更新已中止')
     try { await link(pending, join(dir, name)); committed = true }
     catch (error) { if (error.code === 'EEXIST') throw new Error('主角状态已变化，请重新核对'); throw error }

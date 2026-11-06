@@ -207,8 +207,8 @@ function renderMarkdown(h, marked, source) {
       if (!stage || typeof stage.goal !== 'string' || typeof stage.current !== 'string' || !Array.isArray(stage.visited)) return null
       return h('section', { 'aria-label': '剧本目标与阶段', 'aria-live': 'polite', style: { marginTop: 12, padding: '10px 13px', borderRadius: 10, background: 'rgba(80, 110, 160, 0.07)', fontSize: 13, lineHeight: 1.6 } },
         h('div', null, h('strong', null, '总体目标：'), stage.goal),
-        h('div', null, h('strong', null, '当前阶段（已确认）：'), stage.current),
-        h('div', { style: { opacity: 0.7, fontSize: 12 } }, '阶段根据对话确认，可能稍后更新；请以正在发生的剧情为准。'),
+        h('div', null, h('strong', null, '当前记录的阶段：'), stage.current),
+        h('div', { style: { opacity: 0.7, fontSize: 12 } }, '阶段由 AI 根据剧情申请更新，可能延迟或有误；如与剧情不符，可直接告诉主持。'),
         stage.visited.length > 1 ? h('details', null,
           h('summary', { style: { cursor: 'pointer', opacity: 0.8 } }, '已走过的阶段'),
           h('ol', { style: { margin: '6px 0 0', paddingLeft: 20 } }, stage.visited.map((name, i) => h('li', { key: i }, name)))) : null)
@@ -217,11 +217,17 @@ function renderMarkdown(h, marked, source) {
     function CharacterInfo({ character, unavailable = false }) {
       if (unavailable) return h('div', { role: 'status', style: styles.hint }, '主角状态暂不可核对，请以对话为准；发现不一致可直接告诉主持。')
       if (!character || !Array.isArray(character.fields) || !character.fields.length) return null
+      // Preserve the original stored state for replay, but make direction and
+      // line controls visible instead of letting them reorder the card.
+      const controls = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
+      const visible = value => String(value ?? '').replace(controls, ch => `⟦U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟧`)
+      const hasControls = character.fields.some(field => [field.label, field.value].some(value => typeof value === 'string' && /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(value)))
       return h('details', { 'aria-label': '主角状态', style: { marginTop: 8, padding: '10px 13px', borderRadius: 10, background: 'rgba(80, 110, 160, 0.07)', fontSize: 13, lineHeight: 1.6 } },
         h('summary', { style: { cursor: 'pointer', fontWeight: 650 } }, '主角状态'),
         h('div', { style: { opacity: 0.7, fontSize: 12, marginTop: 5 } }, '明显变化时更新；若与对话不符，可以直接告诉主持。'),
+        hasControls ? h('div', { role: 'status', style: { fontSize: 12 } }, '状态包含不可见控制字符，已用字符编号显示；原记录未修改，请核对。') : null,
         h('dl', { style: { margin: '8px 0 0' } }, character.fields.map((field, i) => h('div', { key: i, style: { display: 'flex', gap: 8, marginTop: 4 } },
-          h('dt', { style: { fontWeight: 600 } }, `${field.label}：`), h('dd', { style: { margin: 0 } }, field.value)))))
+          h('dt', { style: { fontWeight: 600 } }, `${visible(field.label)}：`), h('dd', { style: { margin: 0 } }, visible(field.value))))))
     }
 
     // The running conversation normally collapses the operation card. Keep the
@@ -238,8 +244,8 @@ function renderMarkdown(h, marked, source) {
       const [result, setResult] = React.useState(null)
       React.useEffect(() => {
         let active = true, pending = false
-        const refresh = async () => {
-          if (pending || document.visibilityState === 'hidden') return
+        const refresh = async (force = false) => {
+          if (pending || (!force && document.visibilityState === 'hidden')) return
           pending = true
           try {
             const response = await fetch(`api/trpg.view?sessionId=${encodeURIComponent(props.sessionId)}`, { cache: 'no-store' })
@@ -249,9 +255,13 @@ function renderMarkdown(h, marked, source) {
           } catch { if (active) setResult(previous => previous?.id === props.sessionId && (previous.stage || previous.character) ? { id: props.sessionId, stage: null, unavailable: !!previous.stage, character: null, characterUnavailable: !!previous.character } : null) }
           finally { pending = false }
         }
-        refresh()
-        const timer = setInterval(refresh, running ? 1500 : 5000)
-        return () => { active = false; clearInterval(timer) }
+        // Hydrate on mount even if Electron reports the window as hidden;
+        // only recurring polling should be suppressed in the background.
+        refresh(true)
+        const timer = setInterval(() => refresh(), running ? 1500 : 5000)
+        const onVisibilityChange = () => { if (document.visibilityState === 'visible') refresh() }
+        document.addEventListener('visibilitychange', onVisibilityChange)
+        return () => { active = false; clearInterval(timer); document.removeEventListener('visibilitychange', onVisibilityChange) }
       }, [props.sessionId, running, updated])
       if (!result || result.id !== props.sessionId) return null
       return h(React.Fragment, null, h(StageInfo, { stage: result.stage, unavailable: result.unavailable }), h(CharacterInfo, { character: result.character, unavailable: result.characterUnavailable }))
@@ -460,7 +470,7 @@ function renderMarkdown(h, marked, source) {
             try { ctx.uiWorkspace.openSession(await newSession('AI 跑团 · 选择剧本')) }
             catch (error) { setNote(`无法创建新会话：${error.message}`) }
             finally { setBusy(false) }
-          } }, '另开一组'),
+          } }, '另开一局'),
           note ? h('div', { role: 'alert', style: styles.hint }, note) : null))
       return h(
         'div',
