@@ -1,6 +1,6 @@
 {
   "name": "dsh-trpg-scenario",
-  "version": "0.2.1-test.98-import",
+  "version": "0.2.1-test.99-neutral",
   "description": "AI 跑团剧本加载器：导入剧本包、开局、评分",
   "type": "module",
   "exports": {

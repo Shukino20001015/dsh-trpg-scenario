@@ -358,7 +358,7 @@ function renderMarkdown(h, marked, source) {
           if (importedId) setSelected(importedId)
           setNote(result.text)
           setRevision(n => n + 1)
-        } catch (error) { setNote(`导入失败：${readableError(error)}`) }
+        } catch (error) { const message = readableError(error); setNote(message.startsWith('导入失败：') ? message : `导入失败：${message}`) }
         finally { setBusy(false) }
       }, [props?.sessionId])
       const remove = React.useCallback(async () => {
@@ -395,7 +395,7 @@ function renderMarkdown(h, marked, source) {
           if (result.text?.includes('\n注意：')) window.alert(`评分记录需要人工核对：\n\n${result.text}`)
           ctx.uiWorkspace.openSession(judgeSession)
           setNote(result.text)
-        } catch (error) { setNote(`评分准备失败：${readableError(error)}`) }
+        } catch (error) { const message = readableError(error); setNote(message.startsWith('评分准备失败：') ? message : `评分准备失败：${message}`) }
         finally { setBusy(false); setConfirmedComplete(false) }
       }, [props?.sessionId, selected, newSession, confirmedComplete])
       const start = React.useCallback(async () => {
@@ -454,7 +454,7 @@ function renderMarkdown(h, marked, source) {
           current.criteriaUnverified ? null : h(Criteria, { items: current.criteria }),
           h('div', { style: { fontWeight: 600, marginTop: 14 } }, '固定开场'),
           h('div', { 'data-trpg-markdown': 'opening', style: { lineHeight: 1.7 } }, renderMarkdown(h, marked, current.opening)),
-          h('div', { style: styles.hint }, '以上是各组共同的初始场景。请在下方输入你们的第一步行动。'),
+          h('div', { style: styles.hint }, '以上是本剧本的固定开场。请在下方输入第一步行动。'),
           h('button', { type: 'button', style: btn, disabled: busy, onClick: async () => {
             setBusy(true)
             try { ctx.uiWorkspace.openSession(await newSession('AI 跑团 · 选择剧本')) }
@@ -507,10 +507,10 @@ function renderMarkdown(h, marked, source) {
         h('div', { style: { marginTop: 12, fontSize: 12.5, lineHeight: 1.6 } },
           h('label', null,
             h('input', { type: 'checkbox', checked: confirmedComplete, onChange: e => setConfirmedComplete(e.target.checked), disabled: busy }),
-            ' 我已逐份核对要上传的记录，确认覆盖对应小组整局游玩（可选）')),
-        h('label', { style: { ...btn, display: 'inline-block', marginLeft: 8, opacity: !selected || busy ? 0.5 : 1 } }, '导入各组日志并准备评分',
-          h('input', { type: 'file', accept: '.zip,.jsonl,application/zip', multiple: true, onChange: judgeFiles, disabled: !selected || busy, style: { width: 1, height: 1, opacity: 0, position: 'absolute' }, 'aria-label': '导入各组游玩日志' })),
-        h('div', { style: styles.hint }, '开局与评分分别创建独立会话，沿用当前会话所选模型。评分前请检查日志中的个人信息；AI 评分可能误用证据或给出不合理分数，须由组织者对照原始记录和评分标准复核。'),
+          ' 我已逐份核对上传的记录，确认每份都覆盖对应的整局游玩（可选）')),
+        h('label', { style: { ...btn, display: 'inline-block', marginLeft: 8, opacity: !selected || busy ? 0.5 : 1 } }, '上传对话日志评分',
+          h('input', { type: 'file', accept: '.zip,.jsonl,application/zip', multiple: true, onChange: judgeFiles, disabled: !selected || busy, style: { width: 1, height: 1, opacity: 0, position: 'absolute' }, 'aria-label': '上传对话日志评分' })),
+        h('div', { style: styles.hint }, '每份日志对应一次游玩，可上传一份单独评分，也可上传多份进行比较（最多 6 份）。开局与评分分别创建独立会话，沿用当前会话所选模型。评分前请检查日志中的个人信息；AI 评分可能误用证据或给出不合理分数，须对照原始记录和评分标准复核。'),
         // The card can be taller than its scroll viewport; keep errors and
         // results visible after file upload even when the user is near the top.
         note ? h('div', { role: 'status', 'aria-live': 'polite', style: { position: 'sticky', bottom: 0, zIndex: 2, padding: '9px 12px', borderRadius: 8, border: '1px solid var(--line, #d7dbe0)', background: 'var(--panel, #f7f8fa)', boxShadow: '0 -4px 16px rgba(30, 50, 80, 0.08)', fontSize: 13, lineHeight: 1.6, whiteSpace: 'pre-wrap', marginTop: 8 } }, note) : null,
