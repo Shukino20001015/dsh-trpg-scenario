@@ -274,6 +274,11 @@ function renderMarkdown(h, marked, source) {
         React.useCallback(() => ctx.sessions.list.getSnapshot(), [ctx]),
       )
       const [note, setNote] = React.useState('')
+      React.useEffect(() => {
+        if (!note.startsWith('已导入：')) return
+        const timer = setTimeout(() => setNote(current => current === note ? '' : current), 8000)
+        return () => clearTimeout(timer)
+      }, [note])
       const [catalog, setCatalog] = React.useState([])
       const [selected, setSelected] = React.useState('')
       const [current, setCurrent] = React.useState(undefined)
