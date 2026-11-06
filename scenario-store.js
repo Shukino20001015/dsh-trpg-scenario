@@ -96,9 +96,21 @@ export function readPack(buffer) {
     fileParent = parent
     if ((flags & 1) || ![0, 8].includes(method) || length > MAX_FILE || (total += length) > MAX_TOTAL) throw new Error('ZIP 使用不支持的格式或内容过大。')
     if (local + 30 > start || buffer.readUInt32LE(local) !== 0x04034b50) throw new Error('ZIP 本地条目损坏。')
+    // Reject ambiguous archives: other ZIP readers may use the local header
+    // rather than the central directory. Bit 3 permits deferred sizes/CRC in
+    // a data descriptor, so only compare those fields when it is absent.
+    if (buffer.readUInt16LE(local + 6) !== flags || buffer.readUInt16LE(local + 8) !== method) throw new Error('ZIP 本地条目与目录的标志或压缩方式不一致。')
+    if (!(flags & 8) && (buffer.readUInt32LE(local + 14) !== crc || buffer.readUInt32LE(local + 18) !== compressed || buffer.readUInt32LE(local + 22) !== length)) throw new Error('ZIP 本地条目与目录的长度或校验值不一致。')
     const localName = buffer.readUInt16LE(local + 26), localExtra = buffer.readUInt16LE(local + 28)
     const dataAt = local + 30 + localName + localExtra
     if (dataAt + compressed > start || buffer.subarray(local + 30, local + 30 + localName).toString('utf8') !== path) throw new Error('ZIP 条目边界或名称不一致。')
+    if (flags & 8) {
+      const at = dataAt + compressed
+      const matches = offset => offset + 12 <= start && buffer.readUInt32LE(offset) === crc && buffer.readUInt32LE(offset + 4) === compressed && buffer.readUInt32LE(offset + 8) === length
+      // The descriptor signature is optional; try both forms because the
+      // CRC itself can coincidentally equal the signature.
+      if (!matches(at) && !(at + 4 <= start && buffer.readUInt32LE(at) === 0x08074b50 && matches(at + 4))) throw new Error('ZIP 数据描述符缺失或与目录不一致。')
+    }
     let data
     try { data = method === 0 ? buffer.subarray(dataAt, dataAt + compressed) : inflateRawSync(buffer.subarray(dataAt, dataAt + compressed), { maxOutputLength: MAX_FILE }) }
     catch { throw new Error('ZIP 解压失败或内容过大。') }
