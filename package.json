@@ -1,6 +1,6 @@
 {
   "name": "dsh-trpg-scenario",
-  "version": "0.2.0",
+  "version": "0.2.1-test.97-recovery",
   "description": "AI 跑团剧本加载器：导入剧本包、开局、评分",
   "type": "module",
   "exports": {
@@ -11,11 +11,25 @@
   },
   "files": [
     "index.js",
+    "scenario-store.js",
+    "snapshot-store.js",
+    "stage-graph.js",
+    "stage-store.js",
+    "stage-tool.js",
+    "stage-install.js",
+    "stage-history.js",
+    "character-state.js",
+    "character-store.js",
+    "character-tool.js",
+    "judge-log.js",
+    "score-audit.js",
+    "judge-report.js",
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "MARKED-LICENSE.md"
   ],
   "dsh": {
     "bundle": {
