@@ -4,7 +4,7 @@ import { initializeStageState, readStageState, commitStageTransition } from './s
 // Construct a scoped runtime only for a frozen staged scenario. This module is
 // not registered globally: the caller must install it in that agent's scope,
 // deny every other tool, and restore it from the exact frozen snapshot.
-export const STAGE_RULES = '【阶段运行规则】总体目标与阶段网络仅用于主持；不要泄露未来阶段、隐藏条件或引导玩家决策。当前阶段以程序确认状态为准。每次回复前，先检查当前阶段可用的每条转换条件：若本局已显示的对话明确证明某条条件全部成立，必须先调用 trpg_transition，再继续叙事；不得只在心里更新阶段或跳过申请。quotes 引用一条足以体现关键事实的原文连续片段，必要时才增加引用；每条为 8–200 字，必须逐字复制本局已经显示的玩家或主持对话，不能改写、省略中间内容、引用未输出的想法或只写人名。意向、猜测、未兑现的承诺都不等于结果，证据不充分就不要调用或声称切换。若条件是在你本次回复中才发生，先自然叙述使其成为对话事实，在下一次回复前检查并申请。转换失败时根据工具反馈核对，同一回合最多重新申请一次；不要伪称已切换，不要中断游戏或要求玩家处理，根据已有对话自然继续。'
+export const STAGE_RULES = '【阶段运行规则】总体目标与阶段网络仅用于主持；不要泄露未来阶段、隐藏条件或引导玩家决策。当前阶段以程序确认状态为准。每次回复前，先检查当前阶段可用的每条转换条件：若本局已显示的对话明确证明某条条件全部成立，必须先调用 trpg_transition，再继续叙事；不得只在心里更新阶段或跳过申请。quotes 引用一条足以体现关键事实的原文连续片段，必要时才增加引用；每条为 8–200 字，必须逐字复制本局已经显示的玩家或主持对话，不能改写、省略中间内容、引用未输出的想法或只写人名。意向、猜测、未兑现的承诺都不等于结果，证据不充分就不要调用或声称切换。若条件是在你本次回复中才发生，先自然叙述使其成为对话事实，在下一次回复前检查并申请。转换失败时根据工具反馈核对，同一回合最多重新申请一次；不要伪称已切换，不要中断游戏或要求玩家处理，根据已有对话自然继续。【逐轮阶段出口核对 v1】'
 export const STAGE_CONTRACT = 'trpg-stage-tool-v1'
 
 export async function createStageRuntime({ root, hash, graph, agent, resume = false, rules = STAGE_RULES }) {
@@ -15,7 +15,7 @@ export async function createStageRuntime({ root, hash, graph, agent, resume = fa
     rules,
     `阶段网络：${JSON.stringify(graph)}`,
     `当前确认阶段：${JSON.stringify({ id: state.current, revision: state.revision })}`,
-    `【本轮阶段核对】先检查上一轮玩家和主持已公开的事实，逐条核对当前阶段的可用转换：${JSON.stringify(graph.transitions.filter(item => item.from === state.current))}。只要已有明确证据满足条件，先单独调用 trpg_transition 再叙事；如果事实是在上一次回复中发生，本轮也必须核对，不要因剧情已经继续而略过。条件不明或仅有计划时保持当前阶段；工具拒绝后按原规则继续，不向玩家泄露未到达的阶段。`,
+    ...(rules === STAGE_RULES ? [`【本轮阶段核对】先检查上一轮玩家和主持已公开的事实，逐条核对当前阶段的可用转换：${JSON.stringify(graph.transitions.filter(item => item.from === state.current))}。只要已有明确证据满足条件，先单独调用 trpg_transition 再叙事；如果事实是在上一次回复中发生，本轮也必须核对，不要因剧情已经继续而略过。条件不明或仅有计划时保持当前阶段；工具拒绝后按原规则继续，不向玩家泄露未到达的阶段。`] : []),
   ].join('\n')
   const definition = {
     name: 'trpg_transition',

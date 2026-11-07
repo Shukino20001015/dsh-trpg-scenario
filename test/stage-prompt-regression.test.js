@@ -13,6 +13,8 @@ test('阶段提醒仅显示当前出口，并随阶段转换更新', async () =>
     const agent = { session: { id: 'session-00000000-0000-0000-0000-000000000001', log: [{ type: 'assistant/message', surfaceOp: 'append', seq: 2, data: { message: { content: [{ type: 'text', text: '周一你来到公司并正式开始上班。' }] } } }] } }
     const runtime = await createStageRuntime({ root, hash: 'a'.repeat(64), graph, agent })
     assert.match(runtime.prompt(), /本轮阶段核对.*"id":"start"/)
+    const legacy = await createStageRuntime({ root, hash: 'b'.repeat(64), graph, agent: { session: { id: 'session-00000000-0000-0000-0000-000000000002', log: [] } }, rules: '旧的冻结规则' })
+    assert.doesNotMatch(legacy.prompt(), /本轮阶段核对/)
     assert.equal((await runtime.definition.execute({ transition: 'start', expectedRevision: 0, quotes: ['周一你来到公司并正式开始上班'] }, { agent })).ok, true)
     assert.match(runtime.prompt(), /当前确认阶段：\{"id":"working","revision":1\}/)
     assert.match(runtime.prompt(), /可用转换：\[\]/)
