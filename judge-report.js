@@ -1,5 +1,29 @@
 import { auditScores, safeAuditLabel } from './score-audit.js'
 
+// Verify only verbatim anchors against their exact record, never claim this
+// proves the meaning or attribution of the surrounding overview paragraph.
+export function overviewEvidenceWarnings(report, inputs) {
+  if (!Array.isArray(report?.groups) || !Array.isArray(inputs)) return ['无法核对复盘原文摘录，请人工核对原始记录。']
+  const warnings = []
+  for (const group of report.groups) {
+    const i = group?.group - 1
+    if (!Number.isSafeInteger(i) || i < 0 || !inputs[i]) continue
+    const label = inputs.length === 1 ? '本次游玩' : `第 ${group.group} 组`
+    const evidence = group.overview_evidence
+    if (!Array.isArray(evidence) || !evidence.length || evidence.length > 30) {
+      warnings.push(`${label}：复盘缺少可核对的原文摘录，请人工核对复盘的每项事实与记录编号。`)
+      continue
+    }
+    let invalid = false
+    for (const item of evidence) {
+      if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.record !== 'string' || !/^记录 [1-9]\d{0,14}$/.test(item.record) || typeof item.quote !== 'string' || item.quote.length < 4 || item.quote.length > 200 || !Object.hasOwn(inputs[i], item.record) || !inputs[i][item.record].includes(item.quote)) invalid = true
+    }
+    if (invalid) warnings.push(`${label}：复盘的原文摘录未能在所标记录中逐字找到，请人工核对编号、人物及原文；可能包含转述或截取差异。`)
+    else warnings.push(`${label}：复盘的原文摘录已逐字定位；这不能证明复盘每句话均有依据，也不能证明转述、人物归属和语义正确，仍须人工核对。`)
+  }
+  return warnings
+}
+
 // Some models ignore the requested fence label and use plain `json`. Accept
 // that fallback only when it is the sole eligible block and has a groups
 // array. Never choose between several blocks or bypass downstream validation.

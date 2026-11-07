@@ -162,6 +162,35 @@ export function inspectDialogue(buffer, name = '', options = {}) {
 
 export function extractDialogue(buffer, name = '') { return inspectDialogue(buffer, name).dialogue }
 
+// Reconstruct only dialogue lines from the original judge input, cross-checking
+// the full frozen record index and role index. Never trust the model's report
+// as a source of evidence text or allow a line to fabricate another record.
+export function dialogueInputsFromJudgeRequest(request, trustedRecords, trustedPlayers) {
+  if (typeof request !== 'string' || request.length > 1100000 || !Array.isArray(trustedRecords) || !Array.isArray(trustedPlayers) || !trustedRecords.length || trustedRecords.length > 6 || trustedPlayers.length !== trustedRecords.length) return null
+  const groups = trustedRecords.map(() => new Map()), seen = new Set()
+  let current = -1
+  for (const line of request.split('\n')) {
+    const header = /^【第 ([1-6]) (?:组|份游玩记录)；文件名仅供识别：("(?:[^"\\]|\\.)*")】$/.exec(line)
+    if (header) {
+      const i = Number(header[1]) - 1
+      if (i >= groups.length || seen.has(i)) return null
+      try { if (typeof JSON.parse(header[2]) !== 'string') return null } catch { return null }
+      seen.add(i); current = i; continue
+    }
+    const row = /^\[记录 (\d+) · (玩家原始输入|玩家|主持生成（含人物对话与可能的代写）|游玩智能体)\] ("(?:[^"\\]|\\.)*")$/.exec(line)
+    if (!row) continue
+    if (current < 0 || !Array.isArray(trustedRecords[current]) || !Array.isArray(trustedPlayers[current])) return null
+    const id = `记录 ${row[1]}`, player = row[2] === '玩家原始输入' || row[2] === '玩家'
+    if (!trustedRecords[current].includes(id) || trustedPlayers[current].includes(id) !== player || groups[current].has(id)) return null
+    let text
+    try { text = JSON.parse(row[3]) } catch { return null }
+    if (typeof text !== 'string') return null
+    groups[current].set(id, text)
+  }
+  if (seen.size !== groups.length || groups.some((group, i) => !Array.isArray(trustedRecords[i]) || group.size !== trustedRecords[i].length || trustedRecords[i].some(id => !group.has(id)))) return null
+  return groups.map(group => Object.fromEntries(group))
+}
+
 // Reconstruct only the original player text already present in the prepared
 // judge request. The record number must agree with the independently frozen
 // role index. JSON-string boundaries prevent a player's text from introducing

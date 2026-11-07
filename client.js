@@ -449,7 +449,7 @@ function renderMarkdown(h, marked, source) {
       if (current === undefined) return h('div', { style: styles.hint }, '正在读取跑团会话…')
       if (isJudge && !current) return h('div', { style: styles.wrap, 'data-trpg': 'judge-audit' },
         h('div', { style: styles.head }, '评分结果核对'),
-        h('div', { style: styles.hint }, '报告生成后，可检查结构化评分中的档位、记录编号和加总。结果仅对应检查时的报告；继续对话后请重新检查。文字理由与实际证据仍须人工复核。'),
+        h('div', { style: styles.hint }, '报告生成后，点击下方按钮核对评分档位、记录编号、加总及复盘原文摘录。逐字匹配不等于事实或人物归属正确，请对照原始日志人工复核；继续对话后需重新检查。'),
         h('button', { type: 'button', style: btn, disabled: busy || !judgeSession || !liveSession || judgeRunning, onClick: async () => {
           setBusy(true)
           const requestedStamp = judgeStampRef.current

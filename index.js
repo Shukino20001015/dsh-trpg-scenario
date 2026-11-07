@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { importPack, listScenarios, parseManifest, parsePublicCriteria, parseScoreBands, removeScenario, requireId } from './scenario-store.js'
-import { inspectDialogue, playerInputsFromJudgeRequest } from './judge-log.js'
-import { auditGroupReports, canonicalizeEvidenceReferences, completenessReviewWarning, coverageClaimReviewWarning, findExplicitTextConflicts, formatAuditedScores, playerEvidenceReviewWarnings, playerQuoteReviewWarnings, parseScoreReport } from './judge-report.js'
+import { inspectDialogue, playerInputsFromJudgeRequest, dialogueInputsFromJudgeRequest } from './judge-log.js'
+import { auditGroupReports, canonicalizeEvidenceReferences, completenessReviewWarning, coverageClaimReviewWarning, findExplicitTextConflicts, formatAuditedScores, playerEvidenceReviewWarnings, playerQuoteReviewWarnings, overviewEvidenceWarnings, parseScoreReport } from './judge-report.js'
 import { readSnapshot, saveSnapshot, snapshotHash, snapshotPolicy } from './snapshot-store.js'
 import { parseStageGraph, publicStageState } from './stage-graph.js'
 import { createStageRuntime, STAGE_CONTRACT, STAGE_RULES } from './stage-tool.js'
@@ -46,6 +46,7 @@ const JUDGE_SPEAKERS = '【发言与行动主体核对】记录标签区分“�
 // This operational reminder is not part of the frozen scenario/rubric hash:
 // adding review guidance must not make already recorded games unscoreable.
 const JUDGE_FACT_LINKS = '【事实归属与先后核对】提及价格、承诺、人物关系、消息和事件时，核对同一条证据中的具体主体、接收方与时间顺序；不同公司、岗位、人物和渠道不能因数字相似就合并。先确认是谁在何处提出，才写“某公司给出某条件”；玩家行动发生在对方回应之前时，不得写成“面对该回应作出行动”。找不到可靠对应时写主体或先后未能确认，不能靠推测补齐。主持代写与玩家指令矛盾时，明确区分两者，不把模型自行改写当作玩家主动改正。玩家指出主持误写且主持明确更正时，要同时核对原行动、误写与更正：不得把已撤回的误写作为玩家的决定或保留其直接错误后果；仅提出异议但未解决的，标记争议，不自行裁定。更正不自动推翻与误写无关的独立事实，也不要将撤回前的旧回应与更正后的新回应混为一谈。引用编号存在不代表它支持你的叙述；报告生成后仍须由组织者人工核对。'
+const JUDGE_OVERVIEW_EVIDENCE = '【过程复盘逐条核对】叙述每个具体事实前，回查该条记录原文，核对说话人物、所属公司、时间与确定程度。不同记录的内容拆开叙述并分别引用，不能把后来的确认提前归给先前记录，不能把尚待确认说成已经确认。报告先给简洁自然的过程概述，紧接一小段“复盘依据”，逐条写明对应记录编号及该条记录中连续逐字原文（每条摘录 4–200 字），不要将概述中的转述放在引号内冒充原文。仅公开开场才能确认的事实标记“开场已公开”，不要编造记录编号。没有合适原文时标为未能确认，不能编造或凑摘录。多份记录分别核对，不能跨份引用。'
 const STAGE_PROTOCOL = Object.freeze({ contract: STAGE_CONTRACT, rules: STAGE_RULES, overview: JUDGE_OVERVIEW, speakers: JUDGE_SPEAKERS })
 const CHARACTER_PROTOCOL = Object.freeze({ contract: 'trpg-character-tool-v1', rules: CHARACTER_RULES })
 
@@ -553,6 +554,7 @@ export function apply(ctx, config = {}) {
         ...(groups.length === 1 ? ['【单份游玩记录的称呼】本次只有一份游玩记录，不能据此假定参与者分组或人数；面向读者的复盘和评分称“本次游玩”或“本份记录”，不要写“第 1 组”“一组”或“跨组比较”等分组措辞。若需解释不排名，写“仅提供一份记录，无法比较”，不要推断参与形式。机器审计 JSON 仍须保留 groups 与 group:1 的约定字段。'] : []),
         JUDGE_SPEAKERS,
         JUDGE_FACT_LINKS,
+        JUDGE_OVERVIEW_EVIDENCE,
         ...(unknown.length || unknownVersion.length ? ['部分记录的剧本编号或游玩内容未经确认；在组织者确认可比前不作组间排名。具体情况见记录说明。'] : []),
         ...(identical ? ['【重复记录提醒】有多组导入的对话完全相同，可能是重复上传，也可能是不同组恰好产生相同记录。请明确提示组织者核对，在组织者确认前不作组间排名。'] : []),
         ...(dialogueCaveats.length ? [`【对话末尾及中断提示】${dialogueCaveats.join('；')}。请指出这些情况，不能把中断回复视作完整回复，也不能假定未见的行动结果。它们不必然证明整局日志缺失，请结合原始记录由组织者核对。`] : []),
@@ -565,7 +567,7 @@ export function apply(ctx, config = {}) {
           ? '【本次记录完整性：组织者人工核对声明】组织者明确声明已逐份核对上传的记录覆盖对应的整局游玩。此声明是人工核对依据，非系统自动证明，也非防篡改证明。若无明确矛盾或截断证据，报告应写“组织者声明已核对全程”，并按评分标准中经人工核对的完整记录评估；若有明确矛盾或截断证据，指出冲突，不得当成已验证完整。不要遗漏或否认本声明。'
           : '【完整性未确认】本次未提供组织者逐份核对全程的声明，也没有系统自动验证。不能仅因看到收场或对话自然就判完整；有明确截断证据则报告截断，否则完整性为无法判断。',
         ...(sc.scoreBands ? [
-          '【程序审计输出】报告末尾另输出一个 trpg-score-json 代码块，内容为 JSON：{"groups":[{"group":1,"dimensions":[{"name":"维度名称","score":1,"band":{"min":0,"max":2},"evidence":["记录 1"]}],"total":1}]}。按实际组数和剧本维度填写；无法评定时 score 和 total 写 null；引用使用当前组真实记录编号。数字档位必须与评分表一致。代码块不代替面向人的分析，组织者仍需核查。',
+          '【程序审计输出】报告末尾另输出一个 trpg-score-json 代码块，内容为 JSON：{"groups":[{"group":1,"overview_evidence":[{"record":"记录 1","quote":"该记录中连续的逐字原文"}],"dimensions":[{"name":"维度名称","score":1,"band":{"min":0,"max":2},"evidence":["记录 1"]}],"total":1}]}。overview_evidence 应与本组复盘依据逐条对应；记录号必须来自本组，quote 逐字摘录该条记录中连续的 4–200 字，无法定位时不编造。按实际组数和剧本维度填写；无法评定时 score 和 total 写 null；引用使用当前组真实记录编号。数字档位必须与评分表一致。代码块不代替面向人的分析，组织者仍需核查。',
           AUDIT_MARKER + Buffer.from(JSON.stringify({ bands: sc.scoreBands, groups: groups.map(group => group.recordIds), playerRecords: groups.map(group => group.playerRecordIds), versionUnverified: Boolean(unknown.length || unknownVersion.length), duplicateRecords: identical, confirmedComplete })).toString('base64'),
         ] : []),
         POLICY_END,
@@ -615,6 +617,9 @@ export function apply(ctx, config = {}) {
     if (playerInputs) cautions.push(...playerQuoteReviewWarnings(text, playerInputs))
     else if (Array.isArray(metadata.playerRecords)) cautions.push('无法完整恢复玩家原始输入，本次未执行逐字引文核对；请对照原始记录人工核查。')
     if (!Array.isArray(metadata.playerRecords)) cautions.push('旧评分会话未保存记录角色信息，请自行核对所引用内容属于玩家还是游玩智能体。')
+    const dialogueInputs = prepared.length === 1 ? dialogueInputsFromJudgeRequest(prepared[0].text, metadata.groups, metadata.playerRecords) : null
+    if (dialogueInputs) cautions.push(...overviewEvidenceWarnings(report, dialogueInputs))
+    else cautions.push('无法完整恢复本次对话的原文索引，未执行复盘摘录核对；请对照原始记录人工检查。')
     if (metadata.versionUnverified !== false) cautions.push('部分记录的剧本编号或规则版本未自动确认，或旧会话未保存此信息；确认可比前不要排名。')
     if (metadata.duplicateRecords !== false) cautions.push('可能存在重复记录，或旧会话未保存重复记录检查结果；请核对上传的记录，确认可比前不要排名。')
     if (metadata.confirmedComplete !== true) cautions.push('未保存组织者逐份核对全程的声明；不能据此认定记录完整。')
