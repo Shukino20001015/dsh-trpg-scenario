@@ -15,6 +15,7 @@ export async function createStageRuntime({ root, hash, graph, agent, resume = fa
     rules,
     `阶段网络：${JSON.stringify(graph)}`,
     `当前确认阶段：${JSON.stringify({ id: state.current, revision: state.revision })}`,
+    `【本轮阶段核对】先检查上一轮玩家和主持已公开的事实，逐条核对当前阶段的可用转换：${JSON.stringify(graph.transitions.filter(item => item.from === state.current))}。只要已有明确证据满足条件，先单独调用 trpg_transition 再叙事；如果事实是在上一次回复中发生，本轮也必须核对，不要因剧情已经继续而略过。条件不明或仅有计划时保持当前阶段；工具拒绝后按原规则继续，不向玩家泄露未到达的阶段。`,
   ].join('\n')
   const definition = {
     name: 'trpg_transition',
