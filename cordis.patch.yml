@@ -2,3 +2,20 @@
     - id: dsh-trpg-scenario
       name: dsh-trpg-scenario
       config: {}
+    - id: dsh-trpg-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: trpg
+        name: AI 跑团
+        description: 仅用于跑团游玩和独立评分，不加载编程工具。
+        plugins:
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
