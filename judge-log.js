@@ -42,6 +42,28 @@ function readSessionZip(buf) {
   return result
 }
 
+// Read only the completed play command; this is a routing hint, never proof
+// that a log or scenario is trustworthy. Full validation still runs later.
+export function inspectScenarioReference(buffer) {
+  const data = buffer.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])) ? readSessionZip(buffer) : buffer
+  if (data.length > MAX_JSONL) throw new Error('日志超过 20 MB。')
+  let source
+  try { source = new TextDecoder('utf-8', { fatal: true }).decode(data) }
+  catch { throw new Error('日志不是有效的 UTF-8。') }
+  const runs = new Map(), completed = []
+  for (const line of source.split(/\r?\n/)) {
+    if (!line.trim()) continue
+    let event
+    try { event = JSON.parse(line) } catch { throw new Error('日志不是有效的 DSH JSONL。') }
+    if (event?.type === 'command/run' && event.data?.name === 'trpg' && typeof event.data?.commandId === 'string') {
+      const match = /^\s*begin\s+([^\s]+)\s+([a-f0-9]{64})\s*$/.exec(event.data.args || '')
+      if (match) runs.set(event.data.commandId, { id: match[1], hash: match[2] })
+    }
+    if (event?.type === 'command/done' && event.data?.kind === 'success' && runs.has(event.data.commandId)) completed.push(runs.get(event.data.commandId))
+  }
+  return completed.length === 1 ? completed[0] : null
+}
+
 export function inspectDialogue(buffer, name = '', options = {}) {
   const data = buffer.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])) ? readSessionZip(buffer) : buffer
   if (data.length > MAX_JSONL) throw new Error('日志超过 20 MB。')
