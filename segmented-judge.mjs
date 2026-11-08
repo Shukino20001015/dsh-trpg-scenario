@@ -46,7 +46,7 @@ export function partitionDialogue(inspected, limit = 6000, { maxSingleRecordChar
 
 // extract is an injected adapter. It must return a completed response with
 // exact source quotes; this function never calls a service or assigns scores.
-export async function collectEvidence(segments, extract, { signal, expectedRecordIds, expectedDialogue } = {}) {
+export async function collectEvidence(segments, extract, { signal, expectedRecordIds, expectedDialogue, onProgress } = {}) {
   if (!Array.isArray(segments) || !segments.length || typeof extract !== 'function' || !Array.isArray(expectedRecordIds) || !expectedRecordIds.length || typeof expectedDialogue !== 'string') throw new Error('分段、原始对话索引或提取器无效')
   const allRefs = new Set(), collected = []
   for (let i = 0; i < segments.length; i++) {
@@ -60,6 +60,7 @@ export async function collectEvidence(segments, extract, { signal, expectedRecor
   if (allRefs.size !== expectedRecordIds.length || [...allRefs].some((ref, index) => ref !== expectedRecordIds[index])) throw new Error('分段未完整覆盖原始记录索引')
   if (segments.map(segment => segment.text).join('\n\n') !== expectedDialogue) throw new Error('分段与原始对话不一致')
   for (const segment of segments) {
+    onProgress?.({ phase: 'extract', completed: collected.length, total: segments.length })
     if (signal?.aborted) return { status: 'incomplete', completed: collected.length, total: segments.length, reason: 'aborted' }
     let response
     try { response = await extract(structuredClone(segment), signal) } catch { return { status: 'incomplete', completed: collected.length, total: segments.length, reason: 'extract-failed' } }
@@ -73,6 +74,7 @@ export async function collectEvidence(segments, extract, { signal, expectedRecor
       evidence.push({ ref: record.ref, role: record.role, quote: item.quote })
     }
     collected.push({ index: segment.index, digest: segment.digest, refs: [...segment.refs], evidence })
+    onProgress?.({ phase: 'extract', completed: collected.length, total: segments.length })
   }
   return { status: 'ready-for-global-review', segments: collected, recordCount: allRefs.size, warning: '分段处理完成不代表证据提取充分；必须全局复核原文及反证，不能仅凭此结果评分。' }
 }

@@ -123,6 +123,7 @@ export const findSavedPlayPolicy = log => findSavedPolicy(log, PLAY_POLICY_START
 export function apply(ctx, config = {}) {
   const root = config.root ?? (process.env.DSH_TRPG_ROOT || join(homedir(), '.dsh', 'trpg', 'scenarios'))
   const startingSessions = new WeakSet()
+  const segmentedProgress = new Map()
   const ok = (text) => ({ kind: 'success', text })
   const err = (text) => ({ kind: 'error', text })
 
@@ -547,6 +548,7 @@ export function apply(ctx, config = {}) {
           const params = new URL(request.url).searchParams
           const id = params.get('sessionId')
           if (!id || !/^session-[a-f0-9-]{36}$/i.test(id)) return Response.json({ error: '会话编号无效' }, { status: 400, headers })
+          if (params.get('progress') === '1') return Response.json({ progress: segmentedProgress.get(id) || null }, { headers })
           const events = await readSessionEvents(ctx.sessionController, id, request.signal)
           if (params.get('snapshot') === '1') {
             const begin = savedBegin(events)
@@ -655,17 +657,21 @@ export function apply(ctx, config = {}) {
     }
     if (!selection?.provider || !selection?.model) return err('无法读取当前模型或默认模型，请先选择模型，再重新开始分段评分。')
     if (!ctx.llm || typeof ctx.llm.stream !== 'function') return err('当前 DSH 不支持分段评分所需的模型接口。')
+    const sessionId = agent.session.id
+    if (sessionId && segmentedProgress.has(sessionId)) return err('当前会话已有分段评分进行中。')
+    if (sessionId) segmentedProgress.set(sessionId, { phase: 'prepare', completed: 0, total: 0 })
     try {
       const buffer = await readAttachment(attachments[0], 40 * 1024 * 1024, signal)
-      const result = await runSegmentedPipeline({ root, buffer, llm: ctx.llm, provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort, allowUncertainMixed: true, signal, loadInstalledSnapshot: async id => frozenSnapshot(await loadScenario(join(root, id))) })
+      const result = await runSegmentedPipeline({ root, buffer, llm: ctx.llm, provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort, allowUncertainMixed: true, signal, onProgress: progress => { if (sessionId) segmentedProgress.set(sessionId, progress) }, loadInstalledSnapshot: async id => frozenSnapshot(await loadScenario(join(root, id))) })
       if (result.status !== 'human-review-required') return err(`分段评分未完成，不生成部分成绩。阶段：${result.phase || '未知'}；原因：${result.reason || '未知'}。请保留完整日志并检查模型或版本后重试。`)
       const lines = result.dimensions.map(d => [
         `【${d.name}】${d.score === null ? '无法评定' : `${d.score} 分（档位 ${d.band.min}–${d.band.max}）`}`,
         d.rationale,
         ...d.quotations.map(q => `${q.ref}（${q.role === 'player' ? '玩家' : '主持'}）：${JSON.stringify(q.quote)}`),
       ].join('\n'))
-      return ok([`分段评分草稿，必须人工复核（剧本 ${result.scenarioId}；版本 ${result.versionHash}；${result.recordCount} 条记录、${result.segmentCount} 段）。`, `版本依据：${result.versionSource === 'local-snapshot' ? '本机原局快照' : '与原局摘要匹配的已安装版本'}；摘要不能证明日志真实性。`, ...result.caveats, result.warning, ...lines, `总分：${result.total === null ? '未计算' : result.total + '（待人工复核）'}`, '请对照完整原始记录检查引文是否支持理由、档位是否适用，以及是否遗漏反证；模型输出不是最终成绩。'].join('\n\n'))
+      return ok([`分段评分草稿，必须人工复核（剧本 ${result.scenarioId}；版本 ${result.versionHash}；${result.recordCount} 条记录、${result.segmentCount} 段）。`, '组织者专用：草稿可能包含玩家尚未遇到的人物、剧情或隐藏规则，未经审阅请勿向玩家分享。', `版本依据：${result.versionSource === 'local-snapshot' ? '本机原局快照' : '与原局摘要匹配的已安装版本'}；摘要不能证明日志真实性。`, ...result.caveats, result.warning, ...lines, `总分：${result.total === null ? '未计算' : result.total + '（待人工复核）'}`, '请对照完整原始记录检查引文是否支持理由、档位是否适用，以及是否遗漏反证；模型输出不是最终成绩。'].join('\n\n'))
     } catch (e) { return err(`分段评分准备失败：${e.message}`) }
+    finally { if (sessionId) segmentedProgress.delete(sessionId) }
   }
 
   function cmdAudit(agent) {

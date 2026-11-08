@@ -2,7 +2,7 @@ import { partitionDialogue } from './segmented-judge.mjs'
 import { auditScores } from './score-audit.js'
 import { createHash } from 'node:crypto'
 
-export async function reviewAllDimensions({ inspected, extracted, dimensions, context, review, signal, maxDialogueChars = 240000, timeoutMs = 30000 }) {
+export async function reviewAllDimensions({ inspected, extracted, dimensions, context, review, signal, onProgress, maxDialogueChars = 240000, timeoutMs = 30000 }) {
   if (!inspected || typeof inspected.dialogue !== 'string' || !Number.isSafeInteger(maxDialogueChars) || maxDialogueChars < 128 || inspected.dialogue.length > maxDialogueChars || !Array.isArray(dimensions) || dimensions.length < 1 || dimensions.length > 6 || typeof review !== 'function' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) throw new Error('全局复核输入无效或超过上限；不会静默裁剪')
   if (dimensions.some(d => !d || typeof d.name !== 'string' || !d.name.trim() || d.name.length > 50 || typeof d.rubric !== 'string' || !d.rubric.trim() || d.rubric.length > 10000 || !Array.isArray(d.bands) || !d.bands.length || d.bands.length > 20 || d.bands.some(b => !b || Object.keys(b).sort().join(',') !== 'max,min' || !Number.isFinite(b.min) || !Number.isFinite(b.max) || b.min < 0 || b.max > 100 || b.min > b.max)) || new Set(dimensions.map(d => d.name)).size !== dimensions.length) throw new Error('评分维度或档位无效')
   for (const d of dimensions) for (let i = 0; i < d.bands.length; i++) for (let j = i + 1; j < d.bands.length; j++) if (d.bands[i].min <= d.bands[j].max && d.bands[j].min <= d.bands[i].max) throw new Error('评分档位重叠')
@@ -36,6 +36,7 @@ export async function reviewAllDimensions({ inspected, extracted, dimensions, co
   if (seenRefs.length !== records.length || seenRefs.some((ref, i) => ref !== records[i].ref)) throw new Error('分段结果未完整覆盖原记录')
   const results = []
   for (const dimension of frozenDimensions) {
+    onProgress?.({ phase: 'review', completed: results.length, total: dimensions.length })
     if (signal?.aborted) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: 'aborted' }
     let response
     const controller = new AbortController()
@@ -57,6 +58,7 @@ export async function reviewAllDimensions({ inspected, extracted, dimensions, co
     if (auditScores({ dimensions: [output], total: null }, [dimension.name], { bands: { [dimension.name]: dimension.bands }, evidence: inspected.recordIds }).length) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: 'invalid-score' }
     if (output.score === null && output.band != null) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: 'invalid-score' }
     results.push({ ...output, rationale: response.rationale, quotations: response.evidence.map(item => ({ ref: item.ref, role: recordMap.get(item.ref).role, quote: item.quote })) })
+    onProgress?.({ phase: 'review', completed: results.length, total: dimensions.length })
   }
   const hasUncertain = records.some(record => record.role === 'uncertain')
   return { status: 'human-review-required', dimensions: results, total: hasUncertain || results.some(r => r.score === null) ? null : results.reduce((sum, r) => sum + r.score, 0), warning: hasUncertain ? '存在是否展示未知的混合文本，本结果不计算总分；模型可能受其影响，必须由人对照完整记录复核。' : '模型可能遗漏、误解或错用证据；分值、引文与档位必须由人对照完整记录复核。' }

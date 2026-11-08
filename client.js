@@ -444,17 +444,29 @@ function renderMarkdown(h, marked, source) {
         if (file.size > 40 * 1024 * 1024) { setNote('日志不能超过 40 MB'); return }
         setBusy(true)
         setNote('正在分段提取证据并逐维复核；模型调用可能耗时数分钟，请保持当前窗口打开。')
+        let progressTimer, progressActive = true
         try {
           const judgeSession = await newSession('AI 跑团 · 分段评分')
           const upload = await ctx.fileUpload.upload(judgeSession, file, file.name)
           if (!upload?.ok || !upload.value?.receiptId) throw new Error(upload?.error?.message || '上传失败')
+          const refreshProgress = async () => {
+            try {
+              const response = await fetch(`api/trpg.view?sessionId=${encodeURIComponent(judgeSession)}&progress=1`, { cache: 'no-store' })
+              if (!response.ok) return
+              const { progress } = await response.json()
+              if (!progressActive || !progress || !['extract', 'review'].includes(progress.phase)) return
+              const label = progress.phase === 'extract' ? '分段证据提取' : '逐维全局复核'
+              setNote(`${label}：${progress.completed}/${progress.total} 已完成。单次模型调用可能需要等待，请保持窗口打开。`)
+            } catch { /* retain the last meaningful progress message */ }
+          }
+          progressTimer = setInterval(refreshProgress, 2000)
           const res = await ctx.remote.commands.execute(judgeSession, '/trpg judge-segmented', [{ type: 'file', receiptId: upload.value.receiptId }])
           const result = res?.value?.result
           if (!res?.ok || result?.kind !== 'success') throw new Error(result?.text || '分段评分未完成')
           setNote(result.text)
           ctx.uiWorkspace.openSession(judgeSession)
         } catch (error) { setNote(readableError(error)) }
-        finally { setBusy(false) }
+        finally { progressActive = false; if (progressTimer) clearInterval(progressTimer); setBusy(false) }
       }, [props?.sessionId, newSession])
       const start = React.useCallback(async () => {
         const bridge = ctx.remote?.commands
@@ -480,8 +492,8 @@ function renderMarkdown(h, marked, source) {
       }, [props?.sessionId, selected, scenario?.versionHash, scenario?.title, newSession])
       if (current === undefined) return h('div', { style: styles.hint }, '正在读取跑团会话…')
       if (segmentedReport && !current) return h('div', { style: styles.wrap, 'data-trpg': 'segmented-review' },
-        h('div', { style: styles.head }, '分段评分 · 人工复核'),
-        h('div', { style: styles.hint }, '这是模型草稿，请逐项对照原始日志、评分档位和反证，确认后再由组织者记录最终成绩。'),
+        h('div', { style: styles.head }, '分段评分 · 组织者复核'),
+        h('div', { style: styles.hint }, '模型草稿可能包含未公开剧情，只供组织者审阅；请逐项对照原始日志、评分档位和反证，再记录最终成绩。'),
         h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', font: 'inherit', lineHeight: 1.7 } }, segmentedReport))
       if (isJudge && !current) return h('div', { style: styles.wrap, 'data-trpg': 'judge-audit' },
         h('div', { style: styles.head }, '评分结果核对'),
@@ -580,7 +592,7 @@ function renderMarkdown(h, marked, source) {
           h('input', { type: 'file', accept: '.zip,.jsonl,application/zip', multiple: true, onChange: judgeFiles, disabled: !selected || busy, style: { width: 1, height: 1, opacity: 0, position: 'absolute' }, 'aria-label': '上传对话日志评分' })),
         h('label', { style: { ...btn, display: 'inline-block', marginLeft: 8, opacity: busy ? 0.5 : 1 } }, '单局分段评分',
           h('input', { type: 'file', accept: '.zip,.jsonl,application/zip', onChange: segmentedJudgeFile, disabled: busy, style: { width: 1, height: 1, opacity: 0, position: 'absolute' }, 'aria-label': '上传单局日志进行分段评分' })),
-        h('div', { style: styles.hint }, '分段评分一次处理一局，会多次调用当前所选模型并发送完整对话和评委所需剧本内容；需原局快照或摘要完全匹配的已安装版本，可能耗时并产生多次调用费用。结果需人工逐项复核，不自动比较或排名。'),
+        h('div', { style: styles.hint }, '分段评分一次处理一局，会多次调用当前所选模型并发送完整对话和评委所需剧本内容；需原局快照或摘要完全匹配的已安装版本，可能耗时并产生多次调用费用。草稿仅供组织者审阅，可能泄露未公开剧情；需人工逐项复核，不自动比较或排名。'),
         h('div', { style: styles.hint }, '每份日志对应一次游玩，可上传一份单独评分，也可上传多份进行比较（最多 6 份）。开局与评分分别创建独立会话，沿用当前会话所选模型。评分前请检查日志中的个人信息；AI 评分可能误用证据或给出不合理分数，须对照原始记录和评分标准复核。'),
         // The card can be taller than its scroll viewport; keep errors and
         // results visible after file upload even when the user is near the top.
