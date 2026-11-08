@@ -553,6 +553,7 @@ export function apply(ctx, config = {}) {
         JUDGE_OVERVIEW,
         ...(groups.length === 1 ? ['【单份游玩记录的称呼】本次只有一份游玩记录，不能据此假定参与者分组或人数；面向读者的复盘和评分称“本次游玩”或“本份记录”，不要写“第 1 组”“一组”或“跨组比较”等分组措辞。若需解释不排名，写“仅提供一份记录，无法比较”，不要推断参与形式。机器审计 JSON 仍须保留 groups 与 group:1 的约定字段。'] : []),
         JUDGE_SPEAKERS,
+        ...(groups.some(group => group.mixedHostSeqs.length) ? ['【混合消息】有些主持文本与工具调用在同一条日志消息中；已保留为主持生成内容，不是玩家发言。该文本的桌面显示情况可能不同，不能单凭它断言玩家看到或主动选择了什么；不因此中止评分。'] : []),
         JUDGE_FACT_LINKS,
         JUDGE_OVERVIEW_EVIDENCE,
         ...(unknown.length || unknownVersion.length ? ['部分记录的剧本编号或游玩内容未经确认；在组织者确认可比前不作组间排名。具体情况见记录说明。'] : []),

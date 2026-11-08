@@ -37,6 +37,10 @@ test('拒绝未知工具、被篡改的状态以及混入未显示叙述', () =>
   assert.throws(() => verifyCombinedToolHistory(log(), graph, stageHistory, config, [{ ...characterHistory[0], value: '不相干' }]), /不一致/)
   const mixed = log(); mixed[5].data.message.content.unshift({ type: 'text', text: '没有展示的秘密。' })
   assert.throws(() => verifyCombinedToolHistory(mixed, graph, stageHistory, config, characterHistory), /混合隐藏叙述/)
+  const scoreable = inspectDialogue(Buffer.from(mixed.map(JSON.stringify).join('\n')), '测试组', { stageGraph: graph, characterConfig: config })
+  assert.match(scoreable.dialogue, /没有展示的秘密/)
+  assert.equal(scoreable.uncertainToolOutcomes, 1)
+  assert.deepEqual(scoreable.mixedHostSeqs, [5])
 })
 test('主角状态工具混合未展示文字且被拒绝时，不应阻止已确认阶段的恢复', () => {
   const mixed = log()
@@ -44,6 +48,12 @@ test('主角状态工具混合未展示文字且被拒绝时，不应阻止已�
   mixed[7].data.message.content[0].text = JSON.stringify({ ok: false, message: '状态未更新' })
   assert.equal(verifyCombinedToolHistory(mixed, graph, stageHistory, config, []), true)
   assert.deepEqual(deriveCombinedToolHistory(mixed, graph, config), { stages: stageHistory, character: [] })
+  const parsed = inspectDialogue(Buffer.from(mixed.map(JSON.stringify).join('\n')), '测试组', { stageGraph: graph, characterConfig: config })
+  assert.match(parsed.dialogue, /这段可能没有展示/)
+  assert.match(parsed.dialogue, /记录 5 · 主持生成/)
+  assert.deepEqual(parsed.mixedHostSeqs, [5])
+  assert.doesNotMatch(parsed.dialogue, /trpg_update_character|expectedRevision|状态未更新/)
+  assert.ok(!parsed.playerRecordIds.includes('记录 5'))
 })
 test('状态更新工具未返回明确结果时拒绝将状态当成已确认', () => {
   const broken = log()

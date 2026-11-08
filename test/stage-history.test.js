@@ -27,7 +27,10 @@ test('同条叙事与工具调用不能用作玩家可见阶段证据', () => {
   const saved = [{ ...history()[0], evidence: [23] }]
   assert.throws(() => verifyStageToolHistory(log, saved), /混合隐藏叙述/)
   assert.throws(() => deriveStageToolHistory(log, graph), /混合隐藏叙述/)
-  assert.throws(() => inspectDialogue(Buffer.from(log.map(JSON.stringify).join('\n')), '第一组', { stageGraph: graph }), /阶段工具记录/)
+  const scoring = inspectDialogue(Buffer.from(log.map(JSON.stringify).join('\n')), '第一组', { stageGraph: graph })
+  assert.equal(scoring.uncertainToolOutcomes, 1)
+  assert.deepEqual(scoring.mixedHostSeqs, [23])
+  assert.match(scoring.dialogue, /你今天正式到了公司开始工作/)
   const later = structuredClone(log)
   later[1].data.message.content.reverse()
   assert.throws(() => verifyStageToolHistory(later, saved), /混合隐藏叙述/)

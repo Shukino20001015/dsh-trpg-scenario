@@ -57,10 +57,19 @@ export function inspectDialogue(buffer, name = '', options = {}) {
     catch { throw new Error(`${name} 不是有效的 DSH JSONL 日志。`) }
     const noteUnknown = () => { uncertainToolOutcomes++ }
     try { stagedHistory = options.characterConfig ? deriveCombinedToolHistory(stagedEvents, options.stageGraph, options.characterConfig, noteUnknown).stages : deriveStageToolHistory(stagedEvents, options.stageGraph, noteUnknown) }
-    catch { throw new Error(`${name} 的阶段工具记录不完整或与剧本规则不一致，请人工核对。`) }
+    catch (error) {
+      // A legacy tool may have succeeded in a mixed message. Do not treat that
+      // success as verified stage history, but it must not block scoring the
+      // original dialogue. All other malformed/tampered histories still fail.
+      if (error?.message === '成功工具调用混合隐藏叙述') {
+        stagedHistory = []
+        uncertainToolOutcomes++
+      } else throw new Error(`${name} 的阶段工具记录不完整或与剧本规则不一致，请人工核对。`)
+    }
   }
   const dialogueHash = createHash('sha256')
   let sawFirstDialogue = false
+  const mixedHostSeqs = []
   const interruptedAssistantSeqs = []
   const assistantTurns = new Map(), abortedTurns = new Set()
   let lastParticipantRole = null
@@ -122,9 +131,10 @@ export function inspectDialogue(buffer, name = '', options = {}) {
     if (blocks.some(block => !block || typeof block !== 'object' || (role === '玩家' && block.type !== 'text') || (role === '游玩智能体' && !['text', 'reasoning', ...(options.stageGraph ? ['tool-call'] : [])].includes(block.type)))) throw new Error(`${name} 含图片、附件或工具等非文本内容，不能自动还原完整游玩证据，请人工核对。`)
     if (blocks.some(block => block.type === 'text' && typeof block.text !== 'string')) throw new Error(`${name} 的文本记录格式无效。`)
     const text = (blocks || []).filter(block => block.type === 'text' && typeof block.text === 'string').map(block => block.text).join('\n')
-    // DSH's conversation view can hide text belonging to an assistant message
-    // that also calls a tool. Do not silently score unseen narration as play.
-    if (role === '游玩智能体' && text.trim() && blocks.some(block => block.type === 'tool-call')) throw new Error(`${name} 含与工具调用混合的主持文本；桌面可能未展示该文本，无法自动确认玩家看到的内容，请人工核对。`)
+    // Preserve narration even when it shares a message with a tool call. The
+    // actual desktop rendering may differ; keep its assistant provenance and
+    // never turn tool arguments/results into dialogue or stage evidence.
+    if (role === '游玩智能体' && text.trim() && blocks.some(block => block.type === 'tool-call')) mixedHostSeqs.push(event.seq)
     if (!options.stageGraph || text.trim()) lastParticipantRole = role
     if (!text.trim()) continue
     if (!Number.isSafeInteger(event.seq) || event.seq <= lastDialogueSeq) throw new Error(`${name} 的对话记录编号缺失或顺序无效。`)
@@ -157,7 +167,7 @@ export function inspectDialogue(buffer, name = '', options = {}) {
   if (text.length > MAX_DIALOGUE) throw new Error(`${name} 的对话过长；为避免遗漏证据，本次不会自动截断。`)
   const ids = new Set(completedPlays.map(x => x.id).filter(Boolean))
   if (ids.size > 1) throw new Error(`${name} 包含多个不同剧本的开局记录，请人工核对。`)
-  return { dialogue: text, dialogueFingerprint: dialogueHash.digest('hex'), recordIds, playerRecordIds, interruptedAssistantSeqs, abortedTurns: [...abortedTurns], lastPlayerUnanswered: lastParticipantRole === '玩家', scenarioId: completedPlays.length === 1 ? completedPlays[0].id : null, versionHash: completedPlays.length === 1 ? completedPlays[0].hash : null, playPolicy, ...(stagedHistory ? { stagedTransitionCount: stagedHistory.length, uncertainToolOutcomes } : {}) }
+  return { dialogue: text, dialogueFingerprint: dialogueHash.digest('hex'), recordIds, playerRecordIds, mixedHostSeqs, interruptedAssistantSeqs, abortedTurns: [...abortedTurns], lastPlayerUnanswered: lastParticipantRole === '玩家', scenarioId: completedPlays.length === 1 ? completedPlays[0].id : null, versionHash: completedPlays.length === 1 ? completedPlays[0].hash : null, playPolicy, ...(stagedHistory ? { stagedTransitionCount: stagedHistory.length, uncertainToolOutcomes } : {}) }
 }
 
 export function extractDialogue(buffer, name = '') { return inspectDialogue(buffer, name).dialogue }
