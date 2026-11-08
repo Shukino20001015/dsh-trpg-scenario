@@ -46,7 +46,7 @@ export function partitionDialogue(inspected, limit = 6000, { maxSingleRecordChar
 
 // extract is an injected adapter. It must return a completed response with
 // exact source quotes; this function never calls a service or assigns scores.
-export async function collectEvidence(segments, extract, { signal, expectedRecordIds, expectedDialogue, onProgress } = {}) {
+export async function collectEvidence(segments, extract, { signal, expectedRecordIds, expectedDialogue, onProgress, consumeRetry } = {}) {
   if (!Array.isArray(segments) || !segments.length || typeof extract !== 'function' || !Array.isArray(expectedRecordIds) || !expectedRecordIds.length || typeof expectedDialogue !== 'string') throw new Error('分段、原始对话索引或提取器无效')
   const allRefs = new Set(), collected = []
   for (let i = 0; i < segments.length; i++) {
@@ -62,17 +62,29 @@ export async function collectEvidence(segments, extract, { signal, expectedRecor
   for (const segment of segments) {
     onProgress?.({ phase: 'extract', completed: collected.length, total: segments.length })
     if (signal?.aborted) return { status: 'incomplete', completed: collected.length, total: segments.length, reason: 'aborted' }
-    let response
-    try { response = await extract(structuredClone(segment), signal) } catch { return { status: 'incomplete', completed: collected.length, total: segments.length, reason: 'extract-failed' } }
-    if (signal?.aborted) return { status: 'incomplete', completed: collected.length, total: segments.length, reason: 'aborted' }
-    if (!response || response.status !== 'complete' || response.digest !== segment.digest || !Array.isArray(response.evidence) || response.evidence.length > 100) return { status: 'incomplete', completed: collected.length, total: segments.length, reason: 'invalid-response' }
     const records = new Map(segment.records.map(record => [record.ref, record]))
-    const evidence = []
-    for (const item of response.evidence) {
-      const record = records.get(item?.ref)
-      if (!record || typeof item.quote !== 'string' || !item.quote.trim() || item.quote.length > 500 || !record.text.includes(item.quote)) return { status: 'incomplete', completed: collected.length, total: segments.length, reason: 'invalid-evidence' }
-      evidence.push({ ref: record.ref, role: record.role, quote: item.quote })
+    let evidence, reason = 'extract-failed'
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      let response
+      try { response = await extract({ ...structuredClone(segment), ...(attempt > 1 ? { retry: true } : {}) }, signal) }
+      catch { response = null; reason = 'extract-failed' }
+      if (signal?.aborted) return { status: 'incomplete', completed: collected.length, total: segments.length, reason: 'aborted' }
+      if (response) {
+        if (response.status !== 'complete' || response.digest !== segment.digest || !Array.isArray(response.evidence) || response.evidence.length > 100) reason = 'invalid-response'
+        else {
+          const validated = []
+          for (const item of response.evidence) {
+            const record = records.get(item?.ref)
+            if (!record || typeof item.quote !== 'string' || !item.quote.trim() || item.quote.length > 500 || !record.text.includes(item.quote)) { reason = 'invalid-evidence'; break }
+            validated.push({ ref: record.ref, role: record.role, quote: item.quote })
+          }
+          if (validated.length === response.evidence.length) { evidence = validated; break }
+        }
+      }
+      if (attempt === 2 || typeof consumeRetry !== 'function' || !consumeRetry()) break
+      onProgress?.({ phase: 'extract', completed: collected.length, total: segments.length, retry: true })
     }
+    if (!evidence) return { status: 'incomplete', completed: collected.length, total: segments.length, reason }
     collected.push({ index: segment.index, digest: segment.digest, refs: [...segment.refs], evidence })
     onProgress?.({ phase: 'extract', completed: collected.length, total: segments.length })
   }

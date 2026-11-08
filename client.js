@@ -456,7 +456,7 @@ function renderMarkdown(h, marked, source) {
               const { progress } = await response.json()
               if (!progressActive || !progress || !['extract', 'review'].includes(progress.phase)) return
               const label = progress.phase === 'extract' ? '分段证据提取' : '逐维全局复核'
-              setNote(`${label}：${progress.completed}/${progress.total} 已完成。单次模型调用可能需要等待，请保持窗口打开。`)
+              setNote(`${label}：${progress.completed}/${progress.total} 已完成。${progress.retry ? '当前段未通过校验，正在重试一次。' : '单次模型调用可能需要等待。'}请保持窗口打开。`)
             } catch { /* retain the last meaningful progress message */ }
           }
           progressTimer = setInterval(refreshProgress, 2000)

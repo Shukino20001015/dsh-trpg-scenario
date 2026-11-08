@@ -663,7 +663,12 @@ export function apply(ctx, config = {}) {
     try {
       const buffer = await readAttachment(attachments[0], 40 * 1024 * 1024, signal)
       const result = await runSegmentedPipeline({ root, buffer, llm: ctx.llm, provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort, allowUncertainMixed: true, signal, onProgress: progress => { if (sessionId) segmentedProgress.set(sessionId, progress) }, loadInstalledSnapshot: async id => frozenSnapshot(await loadScenario(join(root, id))) })
-      if (result.status !== 'human-review-required') return err(`分段评分未完成，不生成部分成绩。阶段：${result.phase || '未知'}；原因：${result.reason || '未知'}。请保留完整日志并检查模型或版本后重试。`)
+      if (result.status !== 'human-review-required') {
+        const phases = { prepare: '准备', extract: '分段提取', 'global-review': '逐维复核' }
+        const reasons = { 'call-budget': '所需调用超过本次上限', 'global-input-limit': '完整复核输入超过上限', 'extract-failed': '模型输出不完整、超时或调用失败', 'invalid-response': '模型输出格式无法核验', 'invalid-evidence': '候选引文不能与对应记录逐字匹配', 'review-failed': '模型复核失败或输出不完整', 'invalid-review': '复核内容或引文无法核验', 'invalid-score': '分数、档位或引用不符合规则', timeout: '模型复核超时', aborted: '任务已中止' }
+        const count = Number.isSafeInteger(result.completed) && Number.isSafeInteger(result.total) ? `；已完成 ${result.completed}/${result.total}` : ''
+        return err(`分段评分未完成，不生成部分成绩。阶段：${phases[result.phase] || '未知'}${count}；原因：${reasons[result.reason] || '结果无法核验'}。请保留完整日志并检查模型或版本后重试。`)
+      }
       const lines = result.dimensions.map(d => [
         `【${d.name}】${d.score === null ? '无法评定' : `${d.score} 分（档位 ${d.band.min}–${d.band.max}）`}`,
         d.rationale,
