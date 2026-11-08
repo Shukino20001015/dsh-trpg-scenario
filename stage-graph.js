@@ -52,7 +52,16 @@ export function resolveEvidenceQuotes(quotes, events) {
   if (!Array.isArray(events) || events.length > 100000) throw new Error('本局对话不可用')
   const resolved = []
   for (const quote of quotes) {
-    const matches = events.filter(event => Number.isSafeInteger(event.seq) && event.seq >= 0 && (event.role === 'user' || event.role === 'assistant') && typeof event.text === 'string' && event.text.includes(quote))
+    const find = text => events.filter(event => Number.isSafeInteger(event.seq) && event.seq >= 0 && (event.role === 'user' || event.role === 'assistant') && typeof event.text === 'string' && event.text.includes(text))
+    let matches = find(quote)
+    // A model may put typographic quotation marks around an otherwise exact
+    // excerpt. Strip only one matching pair and only after the literal quote
+    // was not found; the interior must still be a unique exact substring.
+    const pair = quote[0] + quote.at(-1)
+    if (matches.length === 0 && ['“”', '‘’', '「」', '『』', '""', "''"].includes(pair)) {
+      const inner = quote.slice(1, -1)
+      if (inner.length >= 8 && inner.trim() === inner) matches = find(inner)
+    }
     if (matches.length !== 1) throw new Error('证据未找到或存在歧义，请引用本局唯一原文')
     if (!resolved.includes(matches[0].seq)) resolved.push(matches[0].seq)
   }

@@ -23,7 +23,10 @@ test('只允许本会话引用可见对话更新，错误不暴露文件路径',
     assert.equal((await runtime.definition.execute(request, { agent })).ok, true)
     assert.equal(runtime.current().values.energy, '有所放松')
     assert.match(runtime.prompt(), /有所放松/)
-    assert.equal((await runtime.definition.execute(request, { agent })).ok, false)
+    const duplicate = await runtime.definition.execute(request, { agent })
+    assert.equal(duplicate.ok, false)
+    assert.match(duplicate.message, /本回合不要重试/)
+    assert.match(duplicate.message, /不要重复已有叙述/)
     const resumed = await createCharacterRuntime({ root, session, hash, config, agent, resume: true })
     assert.equal(resumed.current().revision, 1)
   } finally { await rm(root, { recursive: true, force: true }) }

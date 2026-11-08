@@ -4,7 +4,7 @@ import { initializeStageState, readStageState, commitStageTransition } from './s
 // Construct a scoped runtime only for a frozen staged scenario. This module is
 // not registered globally: the caller must install it in that agent's scope,
 // deny every other tool, and restore it from the exact frozen snapshot.
-export const STAGE_RULES = '【阶段运行规则】总体目标与阶段网络仅用于主持；不要泄露未来阶段、隐藏条件或引导玩家决策。当前阶段以程序确认状态为准。每次回复前，先检查当前阶段可用的每条转换条件：若本局已显示的对话明确证明某条条件全部成立，必须先调用 trpg_transition，再继续叙事；不得只在心里更新阶段或跳过申请。quotes 引用一条足以体现关键事实的原文连续片段，必要时才增加引用；每条为 8–200 字，必须逐字复制本局已经显示的玩家或主持对话，不能改写、省略中间内容、引用未输出的想法或只写人名。意向、猜测、未兑现的承诺都不等于结果，证据不充分就不要调用或声称切换。若条件是在你本次回复中才发生，先自然叙述使其成为对话事实，在下一次回复前检查并申请。转换失败时根据工具反馈核对，同一回合最多重新申请一次；不要伪称已切换，不要中断游戏或要求玩家处理，根据已有对话自然继续。【逐轮阶段出口核对 v1】'
+export const STAGE_RULES = '【阶段运行规则】总体目标与阶段网络仅用于主持；不要泄露未来阶段或隐藏条件。当前阶段以程序确认状态为准。每轮先核对已经展示的对话：只有已有原文足以证明转换条件，才在本轮输出任何剧情或选项之前单独调用 trpg_transition；工具调用消息不得包含叙事文字。每条 quotes 为8–200字，逐字复制此前已展示且唯一的原文；不得引用本次工具调用消息中的文本。若条件在本轮剧情才发生，先正常叙述并结束，等玩家下次发言后再核对，不能为了更新卡片重说剧情。工具失败或条件不明时本轮不要再次申请，阶段保持不变；不要重复已有叙述，不追加一组新的引导选项，更不能替玩家作决定。仅在下一次玩家发言后依据已有事实重新核对。阶段提示与用户体验冲突时自然游玩优先；不伪称已切换或要求玩家处理。一次玩家发言只给一段回应和至多一组引导，写完即停。'
 export const STAGE_CONTRACT = 'trpg-stage-tool-v1'
 
 export async function createStageRuntime({ root, hash, graph, agent, resume = false, rules = STAGE_RULES }) {
@@ -44,12 +44,12 @@ export async function createStageRuntime({ root, hash, graph, agent, resume = fa
         return { ok: true, message: `已确认进入「${current.name}」，当前 revision ${state.revision}。继续正常叙事。` }
       } catch (error) {
         // No raw filesystem errors or future-stage details should be exposed.
-        const reason = error?.message === '工具调用混合隐藏叙述' ? '本次工具调用同条消息中的叙述可能未显示给玩家，即使它出现在你的上下文里，也不能当作玩家已经看到的剧情。不要据此推进或假定玩家已知；如该叙述仍适合当前情境，请在接下来的普通回复中重新清楚呈现，留给玩家回应。'
+        const reason = error?.message === '工具调用混合隐藏叙述' ? '本次调用与叙述混在一条消息，界面展示状态不确定，未更新阶段。不要把该段作为可靠证据，也不要重述、续演、补充选项或替玩家决定；本回合停止工具调用。为了避免复述，接下来只回复“请继续。”，然后等待玩家。'
           : error?.message === '证据引用格式无效' ? '引用格式无效：每条必须是 8–200 字、没有首尾空白的连续原文，且不能重复。'
           : error?.message === '证据未找到或存在歧义，请引用本局唯一原文' ? '引用未找到或不唯一：请从已显示的本局对话逐字复制更完整的连续片段，不要改写或引用尚未输出的内容。'
           : error?.message === '阶段已变化，请重新核对' ? '阶段版本已变化，请先按当前确认状态核对。'
           : '申请条件或当前状态不符。'
-        return { ok: false, message: `阶段转换未通过。${reason}不要声称已切换；核对事实后可重试，或继续自然游玩。` }
+        return { ok: false, message: `阶段转换未通过。${reason}本回合不要重试工具，不要重复或追加选项；不伪称已切换，下一次玩家发言时再核对。` }
       }
     },
   }
