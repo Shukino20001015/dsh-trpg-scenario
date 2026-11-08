@@ -16,6 +16,7 @@ import { parseCharacterConfig, publicCharacterState } from './character-state.js
 import { readCharacterState } from './character-store.js'
 import { CHARACTER_RULES, characterProtocolSupported, createCharacterRuntime } from './character-tool.js'
 import { runSegmentedPipeline } from './segmented-pipeline.mjs'
+import { readSessionEvents } from './session-history.js'
 
 export const name = 'dsh-trpg-scenario'
 export const inject = ['commands', 'attachments', 'connection', 'sessionController', 'llm', 'agentDefaultModel']
@@ -537,7 +538,7 @@ export function apply(ctx, config = {}) {
 
   // Owner-authenticated, read-only fetch route avoids recording UI refreshes as
   // chat commands. Session inspection reads events without resuming an Agent.
-  if (ctx.connection?.fetch?.register && ctx.sessionController?.inspect) {
+  if (ctx.connection?.fetch?.register && (ctx.sessionController?.inspect || ctx.sessionController?.events)) {
     ctx.effect(() => ctx.connection.fetch.register({
       path: '/api/trpg.view', methods: ['GET'], requestBody: 'buffered',
       async fetch(request) {
@@ -546,22 +547,22 @@ export function apply(ctx, config = {}) {
           const params = new URL(request.url).searchParams
           const id = params.get('sessionId')
           if (!id || !/^session-[a-f0-9-]{36}$/i.test(id)) return Response.json({ error: '会话编号无效' }, { status: 400, headers })
-          const inspection = await ctx.sessionController.inspect(id, request.signal)
+          const events = await readSessionEvents(ctx.sessionController, id, request.signal)
           if (params.get('snapshot') === '1') {
-            const begin = savedBegin(inspection.events)
+            const begin = savedBegin(events)
             if (!begin) return Response.json({ error: '未找到可核验的原局开局版本。' }, { status: 404, headers })
             const snapshot = await savedSnapshot(begin)
             return new Response(JSON.stringify(snapshot), { headers: { ...headers, 'content-type': 'application/json; charset=utf-8', 'content-disposition': `attachment; filename="trpg-snapshot-${begin.hash}.json"`, 'x-content-type-options': 'nosniff' } })
           }
-          if (params.get('audit') === '1') return Response.json({ result: cmdAudit({ session: { log: inspection.events } }) }, { headers })
-          const current = await cmdCurrent({ session: { id, log: inspection.events } })
+          if (params.get('audit') === '1') return Response.json({ result: cmdAudit({ session: { log: events } }) }, { headers })
+          const current = await cmdCurrent({ session: { id, log: events } })
           if (current.kind !== 'success') return Response.json({ error: current.text }, { status: 409, headers })
           if (params.get('pending') === '1') {
             const game = JSON.parse(current.text)
             return Response.json({ current: game ? { id: game.id, title: game.title } : null }, { headers })
           }
           const catalog = await cmdCatalog()
-          return Response.json({ current: JSON.parse(current.text), catalog: JSON.parse(catalog.text), unreadableScenarioCount: catalog.unreadableCount, judge: Boolean(findSavedJudgePolicy(inspection.events)), segmentedReport: segmentedJudgeResult(inspection.events) }, { headers })
+          return Response.json({ current: JSON.parse(current.text), catalog: JSON.parse(catalog.text), unreadableScenarioCount: catalog.unreadableCount, judge: Boolean(findSavedJudgePolicy(events)), segmentedReport: segmentedJudgeResult(events) }, { headers })
         } catch {
           return Response.json({ error: '读取跑团信息失败' }, { status: 500, headers })
         }
