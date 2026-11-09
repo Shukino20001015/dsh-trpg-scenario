@@ -1,5 +1,6 @@
 // The validated dialogue comes from inspectDialogue, never directly from ZIP.
 import { createHash } from 'node:crypto'
+import { SegmentExtractionFailure } from './segmented-judge-llm.mjs'
 
 export function partitionDialogue(inspected, limit = 6000, { maxSingleRecordChars = Math.max(limit, 24000) } = {}) {
   if (!Number.isSafeInteger(limit) || limit < 128 || !Number.isSafeInteger(maxSingleRecordChars) || maxSingleRecordChars < limit || maxSingleRecordChars > 1000000) throw new Error('分段上限无效')
@@ -67,7 +68,7 @@ export async function collectEvidence(segments, extract, { signal, expectedRecor
     for (let attempt = 1; attempt <= 2; attempt++) {
       let response
       try { response = await extract({ ...structuredClone(segment), ...(attempt > 1 ? { retry: true } : {}) }, signal) }
-      catch { response = null; reason = 'extract-failed' }
+      catch (error) { response = null; reason = error instanceof SegmentExtractionFailure && ['timeout', 'output-limit', 'model-truncated', 'stream-incomplete', 'invalid-response'].includes(error.reason) ? error.reason : 'extract-failed' }
       if (signal?.aborted) return { status: 'incomplete', completed: collected.length, total: segments.length, reason: 'aborted' }
       if (response) {
         if (response.status !== 'complete' || response.digest !== segment.digest || !Array.isArray(response.evidence) || response.evidence.length > 100) reason = 'invalid-response'

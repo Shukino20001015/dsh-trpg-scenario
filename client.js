@@ -217,17 +217,24 @@ function renderMarkdown(h, marked, source) {
     function CharacterInfo({ character, unavailable = false }) {
       if (unavailable) return h('div', { role: 'status', style: styles.hint }, '主角状态暂不可核对，请以对话为准；发现不一致可直接告诉主持。')
       if (!character || !Array.isArray(character.fields) || !character.fields.length) return null
-      // Preserve the original stored state for replay, but make direction and
-      // line controls visible instead of letting them reorder the card.
+      // State fields remain single-line. Quotes may contain ordinary newlines;
+      // preserve those while making direction and other controls explicit.
       const controls = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
-      const visible = value => String(value ?? '').replace(controls, ch => `⟦U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟧`)
-      const hasControls = character.fields.some(field => [field.label, field.value].some(value => typeof value === 'string' && /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(value)))
+      const quoteControls = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
+      const escapeControl = ch => `⟦U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}⟧`
+      const visible = value => String(value ?? '').replace(controls, escapeControl)
+      const visibleQuote = value => String(value ?? '').replace(quoteControls, escapeControl)
+      const hasControls = character.fields.some(field => [field.label, field.value].some(value => typeof value === 'string' && /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(value)) || (Array.isArray(field.sources) && field.sources.some(source => typeof source?.quote === 'string' && /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(source.quote))))
       return h('details', { 'aria-label': '主角状态', style: { marginTop: 8, padding: '10px 13px', borderRadius: 10, background: 'rgba(80, 110, 160, 0.07)', fontSize: 13, lineHeight: 1.6 } },
         h('summary', { style: { cursor: 'pointer', fontWeight: 650 } }, '主角状态'),
         h('div', { style: { opacity: 0.7, fontSize: 12, marginTop: 5 } }, '明显变化时更新；若与对话不符，可以直接告诉主持。'),
         hasControls ? h('div', { role: 'status', style: { fontSize: 12 } }, '状态包含不可见控制字符，已用字符编号显示；原记录未修改，请核对。') : null,
-        h('dl', { style: { margin: '8px 0 0' } }, character.fields.map((field, i) => h('div', { key: i, style: { display: 'flex', gap: 8, marginTop: 4 } },
-          h('dt', { style: { fontWeight: 600 } }, `${visible(field.label)}：`), h('dd', { style: { margin: 0 } }, visible(field.value))))))
+        h('dl', { style: { margin: '8px 0 0' } }, character.fields.map((field, i) => h('div', { key: i, style: { marginTop: 6 } },
+          h('dt', { style: { fontWeight: 600, display: 'inline' } }, `${visible(field.label)}：`), h('dd', { style: { margin: 0, display: 'inline' } }, visible(field.value)),
+          Array.isArray(field.sources) && field.sources.length ? h('details', { style: { marginLeft: 8, fontSize: 12 } },
+            h('summary', { style: { cursor: 'pointer' } }, '查看本次更新引用'),
+            h('div', null, '引用出现过不代表它足以证明状态，请结合对话核对。'),
+            h('ul', { style: { margin: '4px 0', paddingLeft: 18 } }, field.sources.map((source, j) => h('li', { key: j, style: { whiteSpace: 'pre-wrap' } }, `${visible(source.role)}：${visibleQuote(source.quote)}`)))) : null))))
     }
 
     // The running conversation normally collapses the operation card. Keep the
@@ -289,6 +296,8 @@ function renderMarkdown(h, marked, source) {
       const [current, setCurrent] = React.useState(undefined)
       const [isJudge, setIsJudge] = React.useState(false)
       const [segmentedReport, setSegmentedReport] = React.useState(null)
+      const [segmentedJob, setSegmentedJob] = React.useState(null)
+      const [segmentedJobs, setSegmentedJobs] = React.useState([])
       const [revision, setRevision] = React.useState(0)
       const [busy, setBusy] = React.useState(false)
       const [pendingMeta, setPendingMeta] = React.useState({})
@@ -318,6 +327,7 @@ function renderMarkdown(h, marked, source) {
           setCurrent(data.current)
           setIsJudge(data.judge === true)
           setSegmentedReport(typeof data.segmentedReport === 'string' ? data.segmentedReport : null)
+          setSegmentedJob(data.segmentedJob || null)
           const items = data.catalog
           if (!Array.isArray(items)) throw new Error('剧本列表格式错误')
           setCatalog(items)
@@ -326,6 +336,35 @@ function renderMarkdown(h, marked, source) {
         }).catch(error => { if (live) { setCurrent({ error: error.message }); setNote('') } })
         return () => { live = false }
       }, [props?.sessionId, revision])
+      React.useEffect(() => {
+        if (segmentedJob?.status !== 'running' || !props?.sessionId) return
+        let active = true, pending = false
+        const poll = async () => {
+          if (pending) return
+          pending = true
+          try {
+            const response = await fetch(`api/trpg.view?sessionId=${encodeURIComponent(props.sessionId)}&job=1`, { cache: 'no-store' })
+            if (!response.ok) return
+            const data = await response.json()
+            if (!active || !data.job) return
+            setSegmentedJob(data.job)
+            if (data.job.status === 'complete' && typeof data.job.text === 'string') setSegmentedReport(data.job.text)
+          } catch { /* keep the last known state; retry on the next poll */ }
+          finally { pending = false }
+        }
+        poll()
+        const timer = setInterval(poll, 2000)
+        return () => { active = false; clearInterval(timer) }
+      }, [props?.sessionId, segmentedJob?.status])
+      React.useEffect(() => {
+        if (current !== null || !props?.sessionId) return
+        let active = true
+        fetch(`api/trpg.view?sessionId=${encodeURIComponent(props.sessionId)}&jobs=1`, { cache: 'no-store' })
+          .then(response => response.ok ? response.json() : null)
+          .then(data => { if (active) setSegmentedJobs(Array.isArray(data?.jobs) ? data.jobs : []) })
+          .catch(() => { if (active) setSegmentedJobs([]) })
+        return () => { active = false }
+      }, [props?.sessionId, current === null, revision])
       const scenario = catalog.find(item => item.id === selected)
       const pendingCandidates = (sessionList?.ids || []).filter(id => id !== props?.sessionId && sessionList.byId[id]?.blank)
       const candidateKey = JSON.stringify(pendingCandidates.slice(0, 100).sort())
@@ -443,30 +482,18 @@ function renderMarkdown(h, marked, source) {
         if (!file || !props?.sessionId) return
         if (file.size > 40 * 1024 * 1024) { setNote('日志不能超过 40 MB'); return }
         setBusy(true)
-        setNote('正在分段提取证据并逐维复核；模型调用可能耗时数分钟，请保持当前窗口打开。')
-        let progressTimer, progressActive = true
+        setNote('正在启动分段评分任务…')
         try {
           const judgeSession = await newSession('AI 跑团 · 分段评分')
           const upload = await ctx.fileUpload.upload(judgeSession, file, file.name)
           if (!upload?.ok || !upload.value?.receiptId) throw new Error(upload?.error?.message || '上传失败')
-          const refreshProgress = async () => {
-            try {
-              const response = await fetch(`api/trpg.view?sessionId=${encodeURIComponent(judgeSession)}&progress=1`, { cache: 'no-store' })
-              if (!response.ok) return
-              const { progress } = await response.json()
-              if (!progressActive || !progress || !['extract', 'review'].includes(progress.phase)) return
-              const label = progress.phase === 'extract' ? '分段证据提取' : '逐维全局复核'
-              setNote(`${label}：${progress.completed}/${progress.total} 已完成。${progress.retry ? '当前段未通过校验，正在重试一次。' : '单次模型调用可能需要等待。'}请保持窗口打开。`)
-            } catch { /* retain the last meaningful progress message */ }
-          }
-          progressTimer = setInterval(refreshProgress, 2000)
-          const res = await ctx.remote.commands.execute(judgeSession, '/trpg judge-segmented', [{ type: 'file', receiptId: upload.value.receiptId }])
+          const res = await ctx.remote.commands.execute(judgeSession, '/trpg judge-segmented-start', [{ type: 'file', receiptId: upload.value.receiptId }])
           const result = res?.value?.result
-          if (!res?.ok || result?.kind !== 'success') throw new Error(result?.text || '分段评分未完成')
-          setNote(result.text)
+          if (!res?.ok || !result) throw new Error('评分请求未完成，可能已中断或连接断开；请检查评委会话，保留原日志后重试。')
+          if (result.kind !== 'success') throw new Error(result.text || '分段评分未完成，请保留原日志并检查评委会话。')
           ctx.uiWorkspace.openSession(judgeSession)
         } catch (error) { setNote(readableError(error)) }
-        finally { progressActive = false; if (progressTimer) clearInterval(progressTimer); setBusy(false) }
+        finally { setBusy(false) }
       }, [props?.sessionId, newSession])
       const start = React.useCallback(async () => {
         const bridge = ctx.remote?.commands
@@ -490,11 +517,28 @@ function renderMarkdown(h, marked, source) {
           setNote(`异常：${String(e?.message ?? e)}`)
         } finally { setBusy(false) }
       }, [props?.sessionId, selected, scenario?.versionHash, scenario?.title, newSession])
+      const returnToSelector = async () => {
+        setBusy(true)
+        try { ctx.uiWorkspace.openSession(await newSession('AI 跑团 · 选择剧本')) }
+        catch (error) { setNote(`无法打开评分入口：${readableError(error)}`) }
+        finally { setBusy(false) }
+      }
       if (current === undefined) return h('div', { style: styles.hint }, '正在读取跑团会话…')
       if (segmentedReport && !current) return h('div', { style: styles.wrap, 'data-trpg': 'segmented-review' },
         h('div', { style: styles.head }, '分段评分 · 组织者复核'),
-        h('div', { style: styles.hint }, '模型草稿可能包含未公开剧情，只供组织者审阅；请逐项对照原始日志、评分档位和反证，再记录最终成绩。'),
+        h('div', { style: styles.hint }, '模型草稿可能包含未公开剧情，只供组织者审阅；请逐项对照原始日志、评分档位和反证，再记录最终成绩。此会话只用于查看评分，请勿在此输入普通对话。'),
+        h('button', { type: 'button', style: btn, disabled: busy, onClick: returnToSelector }, '返回评分入口'),
+        note ? h('div', { role: 'status', style: styles.hint }, note) : null,
         h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', font: 'inherit', lineHeight: 1.7 } }, segmentedReport))
+      if (segmentedJob && !current) {
+        const progress = segmentedJob.progress
+        const label = progress?.phase === 'extract' ? '分段证据提取' : progress?.phase === 'review' ? '逐维全局复核' : '准备评分'
+        const detail = progress && Number.isSafeInteger(progress.completed) && Number.isSafeInteger(progress.total) ? `：${progress.completed}/${progress.total}` : ''
+        const message = segmentedJob.status === 'running' ? `${label}${detail}。${progress?.retry ? '上一次未完成或未通过校验，正在重试一次。' : '任务正在后台运行。'}`
+          : segmentedJob.status === 'interrupted' ? '任务未在当前进程中运行，可能已中断或仍在其他进程中运行。请检查原进程；如已中断，请保留原日志并在新会话重新评分。'
+          : segmentedJob.text || '任务未完成，请保留原日志并重新评分。'
+        return h('div', { style: styles.wrap, 'data-trpg': 'segmented-job' }, h('div', { style: styles.head }, '分段评分'), h('div', { role: 'status', style: styles.hint }, message), h('div', { style: styles.hint }, '此会话只用于查看评分，请勿在此输入普通对话。'), h('button', { type: 'button', style: btn, disabled: busy, onClick: returnToSelector }, '返回评分入口'), note ? h('div', { role: 'status', style: styles.hint }, note) : null)
+      }
       if (isJudge && !current) return h('div', { style: styles.wrap, 'data-trpg': 'judge-audit' },
         h('div', { style: styles.head }, '评分结果核对'),
         h('div', { style: styles.hint }, '报告生成后，可检查结构化评分中的档位、记录编号和加总。结果仅对应检查时的报告；继续对话后请重新检查。文字理由与实际证据仍须人工复核。'),
@@ -593,6 +637,11 @@ function renderMarkdown(h, marked, source) {
         h('label', { style: { ...btn, display: 'inline-block', marginLeft: 8, opacity: busy ? 0.5 : 1 } }, '单局分段评分',
           h('input', { type: 'file', accept: '.zip,.jsonl,application/zip', onChange: segmentedJudgeFile, disabled: busy, style: { width: 1, height: 1, opacity: 0, position: 'absolute' }, 'aria-label': '上传单局日志进行分段评分' })),
         h('div', { style: styles.hint }, '分段评分一次处理一局，会多次调用当前所选模型并发送完整对话和评委所需剧本内容；需原局快照或摘要完全匹配的已安装版本，可能耗时并产生多次调用费用。草稿仅供组织者审阅，可能泄露未公开剧情；需人工逐项复核，不自动比较或排名。'),
+        segmentedJobs.length ? h('details', { style: { marginTop: 10, fontSize: 13 } },
+          h('summary', { style: { cursor: 'pointer' } }, '组织者：分段评分任务'),
+          h('div', { style: styles.hint }, '任务只供组织者查看；编号用于区分不同评分会话。'),
+          ...segmentedJobs.map(job => h('div', { key: job.session, style: { marginTop: 6 } },
+            h('button', { type: 'button', style: btn, onClick: () => ctx.uiWorkspace.openSession(job.session) }, `打开任务 ${job.session.slice(-8)} · ${({ running: '进行中', complete: '已完成', failed: '未完成', interrupted: '需检查', unavailable: '不可读取' })[job.status] || '未知'}`)))) : null,
         h('div', { style: styles.hint }, '每份日志对应一次游玩，可上传一份单独评分，也可上传多份进行比较（最多 6 份）。开局与评分分别创建独立会话，沿用当前会话所选模型。评分前请检查日志中的个人信息；AI 评分可能误用证据或给出不合理分数，须对照原始记录和评分标准复核。'),
         // The card can be taller than its scroll viewport; keep errors and
         // results visible after file upload even when the user is near the top.

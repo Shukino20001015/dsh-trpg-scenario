@@ -11,12 +11,13 @@ import { parseStageGraph, publicStageState } from './stage-graph.js'
 import { createStageRuntime, STAGE_CONTRACT, STAGE_RULES } from './stage-tool.js'
 import { installStageRuntime } from './stage-install.js'
 import { readStageState, stageSuspended, suspendStage } from './stage-store.js'
-import { deriveStageToolHistory, deriveCombinedToolHistory, validateAmbiguousCombinedRecovery, interruptedStageRecovery, verifyStageToolHistory, verifyCombinedToolHistory } from './stage-history.js'
+import { deriveStageToolHistory, deriveCombinedToolHistory, validateAmbiguousCombinedRecovery, interruptedStageRecovery, verifyStageToolHistory, verifyCombinedToolHistory, characterSourceQuotes } from './stage-history.js'
 import { parseCharacterConfig, publicCharacterState } from './character-state.js'
 import { readCharacterState } from './character-store.js'
 import { CHARACTER_RULES, characterProtocolSupported, createCharacterRuntime } from './character-tool.js'
 import { runSegmentedPipeline } from './segmented-pipeline.mjs'
 import { readSessionEvents } from './session-history.js'
+import { startSegmentedJob, finishSegmentedJob, readSegmentedJob, listSegmentedJobIds } from './segmented-job-store.js'
 
 export const name = 'dsh-trpg-scenario'
 export const inject = ['commands', 'attachments', 'connection', 'sessionController', 'llm', 'agentDefaultModel']
@@ -104,6 +105,15 @@ export function segmentedJudgeResult(log) {
   return ends[0].data.text
 }
 
+export function isBackgroundJudgeSession(log) {
+  if (!Array.isArray(log)) return false
+  return log.some(event => {
+    if (event?.type !== 'command/run' || event.data?.name !== 'trpg' || !/^\s*judge-segmented-start\s*$/.test(event.data?.args || '') || typeof event.data?.commandId !== 'string') return false
+    const ends = log.filter(end => end?.type === 'command/done' && end.data?.commandId === event.data.commandId)
+    return ends.length === 1 && ends[0].data?.kind === 'success'
+  })
+}
+
 function findSavedPolicy(log, startMarker, endMarker) {
   for (const event of [...log].reverse()) {
     if (event.type !== 'system/message') continue
@@ -124,6 +134,17 @@ export function apply(ctx, config = {}) {
   const root = config.root ?? (process.env.DSH_TRPG_ROOT || join(homedir(), '.dsh', 'trpg', 'scenarios'))
   const startingSessions = new WeakSet()
   const segmentedProgress = new Map()
+  const segmentedJobs = new Map()
+  const getSegmentedJob = async id => segmentedJobs.get(id) || await readSegmentedJob(root, id)
+  const isScoringTaskAgent = async agent => {
+    const log = agent?.session?.log, id = agent?.session?.id
+    if (isBackgroundJudgeSession(log) || (typeof id === 'string' && segmentedJobs.has(id))) return true
+    // A host can crash after the start marker is durable but before it logs
+    // command/done. Fence that orphan too, while leaving rejected starts with
+    // no marker usable as ordinary conversations.
+    if (!Array.isArray(log) || !log.some(event => event?.type === 'command/run' && event.data?.name === 'trpg' && /^\s*judge-segmented-start\s*$/.test(event.data?.args || ''))) return false
+    try { return Boolean(await readSegmentedJob(root, id)) } catch { return true }
+  }
   const ok = (text) => ({ kind: 'success', text })
   const err = (text) => ({ kind: 'error', text })
 
@@ -318,6 +339,17 @@ export function apply(ctx, config = {}) {
   // A scoped rule is not retained automatically when a DSH agent is resumed.
   // Restore only a previously rendered system-policy block, never user/log data.
   if (typeof ctx.on === 'function') ctx.on('agent/created', async ({ agent, source }) => {
+    if (await isScoringTaskAgent(agent)) {
+      // A command-only scoring session can be reused by the host's "new
+      // conversation" flow and switched to another preset. It must never
+      // inherit programming tools when it is subsequently opened as an agent.
+      // Some host versions keep preset-local tools visible even under a
+      // restriction. Do not make the saved report impossible to open in
+      // those hosts: agent/request below still rejects every chat turn before
+      // model/tool execution. isolateTools cleans up if it cannot enforce it.
+      try { isolateTools(agent) } catch { /* request boundary remains closed */ }
+      return
+    }
     if (source !== 'resume' || !Array.isArray(agent?.session?.log)) return
     const policy = findSavedJudgePolicy(agent.session.log)
     const judge = isSavedJudgeSession(agent.session.log)
@@ -429,6 +461,14 @@ export function apply(ctx, config = {}) {
     ctx.logger?.info?.(`[trpg] 已恢复${policy ? '评委' : '游玩'}会话的工具隔离`)
   })
 
+  // The scoring pipeline calls ctx.llm directly with its own frozen judge
+  // policy. A normal chat turn in the task session is not that pipeline and
+  // must not silently use whichever preset the host later selected.
+  if (typeof ctx.on === 'function') ctx.on('agent/request', async ({ agent }, next) => {
+    if (await isScoringTaskAgent(agent)) throw new Error('此会话专用于分段评分任务，请返回评分入口另建会话。')
+    return next()
+  })
+
   async function cmdPlay(rawName, agent) {
     let nm = rawName.trim()
     if (!nm) {
@@ -511,8 +551,10 @@ export function apply(ctx, config = {}) {
           if (sc.characterConfig) {
             if (!config.experimentalCharacter || !characterProtocolSupported(snapshot.characterProtocol)) return { stageUnavailable: true, characterUnavailable: true }
             const character = await readCharacterState(root, agent.session.id, begin.hash, sc.characterConfig)
-            verifyCombinedToolHistory(agent.session.log, sc.stageGraph, state.history, sc.characterConfig, character.history)
-            return { stage: publicStageState(sc.stageGraph, state.history), character: publicCharacterState(sc.characterConfig, character.history) }
+            const sources = characterSourceQuotes(agent.session.log, sc.stageGraph, state.history, sc.characterConfig, character.history)
+            const view = publicCharacterState(sc.characterConfig, character.history)
+            view.fields = view.fields.map((field, index) => ({ ...field, ...(sources.has(sc.characterConfig.fields[index].id) ? { sources: sources.get(sc.characterConfig.fields[index].id) } : {}) }))
+            return { stage: publicStageState(sc.stageGraph, state.history), character: view }
           }
           verifyStageToolHistory(agent.session.log, state.history)
           return { stage: publicStageState(sc.stageGraph, state.history) }
@@ -548,7 +590,19 @@ export function apply(ctx, config = {}) {
           const params = new URL(request.url).searchParams
           const id = params.get('sessionId')
           if (!id || !/^session-[a-f0-9-]{36}$/i.test(id)) return Response.json({ error: '会话编号无效' }, { status: 400, headers })
+          if (params.get('jobs') === '1') {
+            const ids = await listSegmentedJobIds(root)
+            const jobs = await Promise.all(ids.map(async session => {
+              try { const job = await getSegmentedJob(session); return { session, status: job?.status || 'unavailable' } }
+              catch { return { session, status: 'unavailable' } }
+            }))
+            return Response.json({ jobs }, { headers })
+          }
           if (params.get('progress') === '1') return Response.json({ progress: segmentedProgress.get(id) || null }, { headers })
+          if (params.get('job') === '1') {
+            const job = await getSegmentedJob(id)
+            return Response.json({ job: job?.status === 'running' ? { status: 'running', progress: segmentedProgress.get(id) || null } : job }, { headers })
+          }
           const events = await readSessionEvents(ctx.sessionController, id, request.signal)
           if (params.get('snapshot') === '1') {
             const begin = savedBegin(events)
@@ -564,7 +618,8 @@ export function apply(ctx, config = {}) {
             return Response.json({ current: game ? { id: game.id, title: game.title } : null }, { headers })
           }
           const catalog = await cmdCatalog()
-          return Response.json({ current: JSON.parse(current.text), catalog: JSON.parse(catalog.text), unreadableScenarioCount: catalog.unreadableCount, judge: Boolean(findSavedJudgePolicy(events)), segmentedReport: segmentedJudgeResult(events) }, { headers })
+          const job = await getSegmentedJob(id)
+          return Response.json({ current: JSON.parse(current.text), catalog: JSON.parse(catalog.text), unreadableScenarioCount: catalog.unreadableCount, judge: Boolean(findSavedJudgePolicy(events)), segmentedReport: job?.status === 'complete' ? job.text : segmentedJudgeResult(events), segmentedJob: job?.status === 'running' ? { status: 'running', progress: segmentedProgress.get(id) || null } : job }, { headers })
         } catch {
           return Response.json({ error: '读取跑团信息失败' }, { status: 500, headers })
         }
@@ -648,7 +703,7 @@ export function apply(ctx, config = {}) {
     } catch (e) { return err(`评分准备失败：${e.message}`) }
   }
 
-  async function cmdSegmentedJudge(agent, attachments, signal) {
+  async function cmdSegmentedJudge(agent, attachments, signal, bufferOverride) {
     if (!cleanSession(agent)) return err('分段评分必须在没有聊天和工具记录的新会话中进行。')
     if (attachments.length !== 1) return err('分段评分一次只处理一份原始游玩日志；请逐份评分并人工比较。')
     let selection = [...agent.session.log].reverse().find(event => event.type === 'model/selection')?.data
@@ -661,11 +716,11 @@ export function apply(ctx, config = {}) {
     if (sessionId && segmentedProgress.has(sessionId)) return err('当前会话已有分段评分进行中。')
     if (sessionId) segmentedProgress.set(sessionId, { phase: 'prepare', completed: 0, total: 0 })
     try {
-      const buffer = await readAttachment(attachments[0], 40 * 1024 * 1024, signal)
+      const buffer = bufferOverride || await readAttachment(attachments[0], 40 * 1024 * 1024, signal)
       const result = await runSegmentedPipeline({ root, buffer, llm: ctx.llm, provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort, allowUncertainMixed: true, signal, onProgress: progress => { if (sessionId) segmentedProgress.set(sessionId, progress) }, loadInstalledSnapshot: async id => frozenSnapshot(await loadScenario(join(root, id))) })
       if (result.status !== 'human-review-required') {
         const phases = { prepare: '准备', extract: '分段提取', 'global-review': '逐维复核' }
-        const reasons = { 'call-budget': '所需调用超过本次上限', 'global-input-limit': '完整复核输入超过上限', 'extract-failed': '模型输出不完整、超时或调用失败', 'invalid-response': '模型输出格式无法核验', 'invalid-evidence': '候选引文不能与对应记录逐字匹配', 'review-failed': '模型复核失败或输出不完整', 'invalid-review': '复核内容或引文无法核验', 'invalid-score': '分数、档位或引用不符合规则', timeout: '模型复核超时', aborted: '任务已中止' }
+        const reasons = { 'call-budget': '所需调用超过本次上限', 'global-input-limit': '完整复核输入超过上限', 'extract-failed': '分段模型接口调用失败', 'invalid-response': '模型输出格式无法核验', 'invalid-evidence': '候选引文不能与对应记录逐字匹配', 'review-failed': '模型接口调用失败', 'model-truncated': '模型达到输出上限，内容被截断', 'output-limit': '模型输出超过本插件长度上限', 'stream-incomplete': '模型输出流未完整结束', 'invalid-review': '复核内容或引文无法核验', 'invalid-score': '分数、档位或引用不符合规则', timeout: '模型调用超时', aborted: '任务已中止' }
         const count = Number.isSafeInteger(result.completed) && Number.isSafeInteger(result.total) ? `；已完成 ${result.completed}/${result.total}` : ''
         return err(`分段评分未完成，不生成部分成绩。阶段：${phases[result.phase] || '未知'}${count}；原因：${reasons[result.reason] || '结果无法核验'}。请保留完整日志并检查模型或版本后重试。`)
       }
@@ -677,6 +732,31 @@ export function apply(ctx, config = {}) {
       return ok([`分段评分草稿，必须人工复核（剧本 ${result.scenarioId}；版本 ${result.versionHash}；${result.recordCount} 条记录、${result.segmentCount} 段）。`, '组织者专用：草稿可能包含玩家尚未遇到的人物、剧情或隐藏规则，未经审阅请勿向玩家分享。', `版本依据：${result.versionSource === 'local-snapshot' ? '本机原局快照' : '与原局摘要匹配的已安装版本'}；摘要不能证明日志真实性。`, ...result.caveats, result.warning, ...lines, `总分：${result.total === null ? '未计算' : result.total + '（待人工复核）'}`, '请对照完整原始记录检查引文是否支持理由、档位是否适用，以及是否遗漏反证；模型输出不是最终成绩。'].join('\n\n'))
     } catch (e) { return err(`分段评分准备失败：${e.message}`) }
     finally { if (sessionId) segmentedProgress.delete(sessionId) }
+  }
+
+  async function cmdStartSegmentedJudge(agent, attachments, signal) {
+    if (!cleanSession(agent)) return err('分段评分必须在没有聊天和工具记录的新会话中进行。')
+    if (attachments.length !== 1) return err('分段评分一次只处理一份原始游玩日志。')
+    const id = agent?.session?.id
+    if (typeof id !== 'string') return err('无法识别评分会话。')
+    try {
+      // Read the upload while the short command owns its receipt. The job
+      // never stores the original log in its own persistent sidecar.
+      const buffer = await readAttachment(attachments[0], 40 * 1024 * 1024, signal)
+      if (signal?.aborted) return err('评分启动已中止。')
+      const frozenAgent = { session: { id, log: structuredClone(agent.session.log) } }
+      await startSegmentedJob(root, id)
+      segmentedJobs.set(id, { status: 'running' })
+      Promise.resolve().then(async () => {
+        let result
+        try { result = await cmdSegmentedJudge(frozenAgent, attachments, undefined, buffer) }
+        catch { result = err('评分任务未完成，请保留原日志并重新开始。') }
+        const terminal = { status: result.kind === 'success' ? 'complete' : 'failed', text: result.text }
+        try { await finishSegmentedJob(root, id, terminal); segmentedJobs.delete(id) }
+        catch { segmentedJobs.set(id, { status: 'failed', text: '评分结果无法安全保存，请保留原日志并重新开始。' }) }
+      }).catch(() => { segmentedJobs.set(id, { status: 'failed', text: '评分任务异常结束，请保留原日志并重新开始。' }) })
+      return ok('分段评分任务已启动；可在评委会话查看进度和最终结果。')
+    } catch (error) { return err(`无法启动分段评分：${error.message}`) }
   }
 
   function cmdAudit(agent) {
@@ -762,6 +842,8 @@ export function apply(ctx, config = {}) {
           return cmdJudge(arg, agent, attachments, signal)
         case 'judge-segmented':
           return cmdSegmentedJudge(agent, attachments, signal)
+        case 'judge-segmented-start':
+          return cmdStartSegmentedJudge(agent, attachments, signal)
         case 'audit':
           return cmdAudit(agent)
         default:

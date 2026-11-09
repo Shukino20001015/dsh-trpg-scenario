@@ -1,8 +1,9 @@
 import { partitionDialogue } from './segmented-judge.mjs'
 import { auditScores } from './score-audit.js'
 import { createHash } from 'node:crypto'
+import { GlobalReviewFailure } from './global-judge-llm.mjs'
 
-export async function reviewAllDimensions({ inspected, extracted, dimensions, context, review, signal, onProgress, maxDialogueChars = 240000, timeoutMs = 30000 }) {
+export async function reviewAllDimensions({ inspected, extracted, dimensions, context, review, signal, onProgress, consumeRetry, maxDialogueChars = 240000, timeoutMs = 30000 }) {
   if (!inspected || typeof inspected.dialogue !== 'string' || !Number.isSafeInteger(maxDialogueChars) || maxDialogueChars < 128 || inspected.dialogue.length > maxDialogueChars || !Array.isArray(dimensions) || dimensions.length < 1 || dimensions.length > 6 || typeof review !== 'function' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) throw new Error('全局复核输入无效或超过上限；不会静默裁剪')
   if (dimensions.some(d => !d || typeof d.name !== 'string' || !d.name.trim() || d.name.length > 50 || typeof d.rubric !== 'string' || !d.rubric.trim() || d.rubric.length > 10000 || !Array.isArray(d.bands) || !d.bands.length || d.bands.length > 20 || d.bands.some(b => !b || Object.keys(b).sort().join(',') !== 'max,min' || !Number.isFinite(b.min) || !Number.isFinite(b.max) || b.min < 0 || b.max > 100 || b.min > b.max)) || new Set(dimensions.map(d => d.name)).size !== dimensions.length) throw new Error('评分维度或档位无效')
   for (const d of dimensions) for (let i = 0; i < d.bands.length; i++) for (let j = i + 1; j < d.bands.length; j++) if (d.bands[i].min <= d.bands[j].max && d.bands[j].min <= d.bands[i].max) throw new Error('评分档位重叠')
@@ -38,7 +39,8 @@ export async function reviewAllDimensions({ inspected, extracted, dimensions, co
   for (const dimension of frozenDimensions) {
     onProgress?.({ phase: 'review', completed: results.length, total: dimensions.length })
     if (signal?.aborted) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: 'aborted' }
-    let response
+    let response, output, reason
+    for (let attempt = 1; attempt <= 2; attempt++) {
     const controller = new AbortController()
     const onAbort = () => controller.abort()
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -47,16 +49,22 @@ export async function reviewAllDimensions({ inspected, extracted, dimensions, co
       if (signal?.aborted) controller.abort()
       const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve({ aborted: true }), { once: true }))
       if (controller.signal.aborted) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: 'aborted' }
-      const result = await Promise.race([Promise.resolve().then(() => review({ dimension: structuredClone(dimension), context: structuredClone(frozenContext), records: structuredClone(records), candidates: structuredClone(candidates) }, controller.signal)).then(value => ({ value })), aborted])
+      const result = await Promise.race([Promise.resolve().then(() => review({ dimension: structuredClone(dimension), context: structuredClone(frozenContext), records: structuredClone(records), candidates: structuredClone(candidates), ...(attempt > 1 ? { retry: true } : {}) }, controller.signal)).then(value => ({ value })), aborted])
       if (result.aborted) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: signal?.aborted ? 'aborted' : 'timeout' }
       response = result.value
-    } catch { return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: 'review-failed' } }
+    } catch (error) { return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: signal?.aborted ? 'aborted' : error instanceof GlobalReviewFailure && ['timeout', 'output-limit', 'model-truncated', 'stream-incomplete'].includes(error.reason) ? error.reason : 'review-failed' } }
     finally { clearTimeout(timer); signal?.removeEventListener('abort', onAbort) }
     if (signal?.aborted) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: 'aborted' }
-    if (!response || response.status !== 'complete' || response.name !== dimension.name || typeof response.rationale !== 'string' || !response.rationale.trim() || response.rationale.length > 4000 || !Array.isArray(response.evidence) || response.evidence.length > 100 || response.evidence.some(item => !item || typeof item.ref !== 'string' || typeof item.quote !== 'string' || !item.quote.trim() || item.quote.length > 500 || recordMap.get(item.ref)?.role === 'uncertain' || !recordMap.get(item.ref)?.text.includes(item.quote))) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: 'invalid-review' }
-    const output = { name: dimension.name, score: response.score, band: response.band, evidence: response.evidence.map(item => item.ref) }
-    if (auditScores({ dimensions: [output], total: null }, [dimension.name], { bands: { [dimension.name]: dimension.bands }, evidence: inspected.recordIds }).length) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: 'invalid-score' }
-    if (output.score === null && output.band != null) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: 'invalid-score' }
+    reason = undefined
+    if (!response || response.status !== 'complete' || response.name !== dimension.name || typeof response.rationale !== 'string' || !response.rationale.trim() || response.rationale.length > 4000 || !Array.isArray(response.evidence) || response.evidence.length > 100 || response.evidence.some(item => !item || typeof item.ref !== 'string' || typeof item.quote !== 'string' || !item.quote.trim() || item.quote.length > 500 || recordMap.get(item.ref)?.role === 'uncertain' || !recordMap.get(item.ref)?.text.includes(item.quote))) reason = 'invalid-review'
+    else {
+      output = { name: dimension.name, score: response.score, band: response.band, evidence: response.evidence.map(item => item.ref) }
+      if (auditScores({ dimensions: [output], total: null }, [dimension.name], { bands: { [dimension.name]: dimension.bands }, evidence: inspected.recordIds }).length || (output.score === null && output.band != null)) reason = 'invalid-score'
+    }
+    if (!reason) break
+    if (attempt === 2 || typeof consumeRetry !== 'function' || !consumeRetry()) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason }
+    onProgress?.({ phase: 'review', completed: results.length, total: dimensions.length, retry: true })
+    }
     results.push({ ...output, rationale: response.rationale, quotations: response.evidence.map(item => ({ ref: item.ref, role: recordMap.get(item.ref).role, quote: item.quote })) })
     onProgress?.({ phase: 'review', completed: results.length, total: dimensions.length })
   }

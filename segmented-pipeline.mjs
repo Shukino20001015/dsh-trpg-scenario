@@ -14,9 +14,10 @@ export async function runSegmentedPipeline({ root, buffer, llm, provider, model,
   const review = makeGlobalReviewer({ llm, provider, model, reasoningEffort, timeoutMs, maxInputChars })
   const records = segments.flatMap(segment => segment.records)
   if (prepared.dimensions.some(dimension => JSON.stringify({ dimension, context: prepared.context, records, candidates: [] }).length > maxInputChars)) return { status: 'incomplete', phase: 'prepare', reason: 'global-input-limit' }
-  const indexed = await collectEvidence(segments, extract, { signal, onProgress, consumeRetry: () => retryBudget > 0 && (--retryBudget >= 0), expectedRecordIds: prepared.inspected.recordIds, expectedDialogue: prepared.inspected.dialogue })
+  const consumeRetry = () => retryBudget > 0 && (--retryBudget >= 0)
+  const indexed = await collectEvidence(segments, extract, { signal, onProgress, consumeRetry, expectedRecordIds: prepared.inspected.recordIds, expectedDialogue: prepared.inspected.dialogue })
   if (indexed.status !== 'ready-for-global-review') return { status: 'incomplete', phase: 'extract', reason: indexed.reason, completed: indexed.completed, total: indexed.total }
-  const result = await reviewAllDimensions({ inspected: prepared.inspected, extracted: indexed, dimensions: prepared.dimensions, context: prepared.context, review, signal, onProgress, timeoutMs })
+  const result = await reviewAllDimensions({ inspected: prepared.inspected, extracted: indexed, dimensions: prepared.dimensions, context: prepared.context, review, signal, onProgress, consumeRetry, timeoutMs })
   if (result.status !== 'human-review-required') return { ...result, phase: 'global-review' }
   return { ...result, scenarioId: prepared.scenarioId, versionHash: prepared.versionHash, versionSource: prepared.versionSource, recordCount: prepared.inspected.recordIds.length, segmentCount: segments.length, caveats: prepared.context.caveats }
 }

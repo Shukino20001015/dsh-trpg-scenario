@@ -1,6 +1,6 @@
 {
   "name": "dsh-trpg-scenario",
-  "version": "0.2.1-wintest.20261108.3",
+  "version": "0.2.1-test.92",
   "description": "AI 跑团剧本加载器：导入剧本包、开局、评分",
   "type": "module",
   "exports": {
@@ -28,6 +28,7 @@
     "segmented-global-review.mjs",
     "global-judge-llm.mjs",
     "segmented-pipeline.mjs",
+    "segmented-job-store.js",
     "judge-log.js",
     "score-audit.js",
     "judge-report.js",

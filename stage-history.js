@@ -129,6 +129,21 @@ export function verifyCombinedToolHistory(log, graph, stageHistory, config, char
   return true
 }
 
+// Present only the exact quotations from successful, verified tool calls.
+// Do not expose other message blocks, model reasoning or unconfirmed writes.
+export function characterSourceQuotes(log, graph, stageHistory, config, characterHistory) {
+  verifyCombinedToolHistory(log, graph, stageHistory, config, characterHistory)
+  const latest = new Map()
+  scanStageToolHistory(log, () => {}, () => { throw new Error('阶段工具结果不确定，不能展示依据') }, ({ args, events }) => {
+    latest.set(args.field, args.quotes.map(quote => {
+      const matches = events.filter(event => typeof event.text === 'string' && event.text.includes(quote))
+      if (matches.length !== 1) throw new Error('状态依据不可核对')
+      return { role: matches[0].role === 'user' ? '玩家' : '主持', quote }
+    }))
+  }, () => { throw new Error('状态工具结果不确定，不能展示依据') })
+  return latest
+}
+
 export function verifyStageToolHistory(log, history) {
   if (!Array.isArray(history)) throw new Error('阶段历史不可核对')
   const count = scanStageToolHistory(log, ({ args, evidence, revision }) => {
