@@ -1,7 +1,12 @@
 - insert:
     - id: dsh-trpg-scenario
       name: dsh-trpg-scenario
-      config: {}
+      config:
+        experimentalCharacter: true
+        experimentalCharacterReview: true
+        experimentalAutoCharacter: true
+        experimentalStageReview: true
+        experimentalAutoStage: true
     - id: dsh-trpg-preset
       name: '@deepseek-ai/dsh-agent-preset'
       config:

@@ -2,7 +2,8 @@ import { constants } from 'node:fs'
 import { lstat, mkdir, open, readdir, link, unlink } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { advanceStage, restoreStageState } from './stage-graph.js'
+import { advanceStage, restoreStageState, validateTransition } from './stage-graph.js'
+import { prepareStageCorrection, replayStageJournal } from './stage-correction.mjs'
 
 const validSession = value => typeof value === 'string' && /^session-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value)
 const validHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
@@ -79,7 +80,7 @@ export async function suspendStage(root, session, hash) {
   if (!await stageSuspended(root, session, hash)) throw new Error('阶段暂停记录不可用')
 }
 
-export async function readStageState(root, session, hash, graph) {
+export async function readStageState(root, session, hash, graph, { allowCorrections = false } = {}) {
   const dir = await stageDirectory(root, session, hash)
   const names = (await readdir(dir)).filter(name => /^\d{6}\.json$/.test(name)).sort()
   if (!names.length || names.length > 10001 || names.some((name, i) => name !== filename(i))) throw new Error('阶段记录缺失或不连续')
@@ -87,7 +88,7 @@ export async function readStageState(root, session, hash, graph) {
   if (!header || Object.keys(header).sort().join(',') !== 'hash,initial,session,version' || header.version !== 1 || header.session !== session || header.hash !== hash || header.initial !== graph.initial) throw new Error('阶段记录与开局不匹配')
   const history = []
   for (const name of names.slice(1)) history.push(await readJson(join(dir, name)))
-  return restoreStageState(graph, history)
+  return allowCorrections ? replayStageJournal(graph, history) : restoreStageState(graph, history)
 }
 
 export async function initializeStageState(root, session, hash, graph) {
@@ -103,5 +104,28 @@ export async function commitStageTransition(root, session, hash, graph, request,
   const next = advanceStage(graph, state.history, request, events)
   const dir = await stageDirectory(root, session, hash)
   await publish(dir, filename(next.revision), next.history.at(-1), signal)
+  return next
+}
+
+// Deliberately not wired into the live tool yet. The caller must also record
+// a corresponding DSH tool call/result and verify that transcript on recovery.
+export async function commitStageCorrection(root, session, hash, graph, request, events, signal) {
+  if (signal?.aborted) throw new Error('阶段申请已中止')
+  if (!request || typeof request !== 'object' || Array.isArray(request) || Object.keys(request).sort().join(',') !== 'expectedRevision,quotes,targetRevision') throw new Error('阶段纠正申请格式无效')
+  const state = await readStageState(root, session, hash, graph, { allowCorrections: true })
+  const next = prepareStageCorrection({ graph, history: state.history, events, expectedRevision: request.expectedRevision, targetRevision: request.targetRevision, quotes: request.quotes })
+  const dir = await stageDirectory(root, session, hash)
+  await publish(dir, filename(next.revision), next.history.at(-1), signal)
+  return next
+}
+
+export async function commitStageJournalTransition(root, session, hash, graph, request, events, signal) {
+  if (signal?.aborted) throw new Error('阶段申请已中止')
+  const state = await readStageState(root, session, hash, graph, { allowCorrections: true })
+  if (state.history.length >= 10000) throw new Error('阶段历史已达上限')
+  const entry = validateTransition(graph, state, request, events)
+  const next = replayStageJournal(graph, [...state.history, entry])
+  const dir = await stageDirectory(root, session, hash)
+  await publish(dir, filename(next.revision), entry, signal)
   return next
 }

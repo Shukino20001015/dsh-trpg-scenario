@@ -1,7 +1,10 @@
 import { inflateRawSync } from 'node:zlib'
 import { createHash } from 'node:crypto'
 import { crc32 } from './scenario-store.js'
-import { deriveCombinedToolHistory, deriveStageToolHistory } from './stage-history.js'
+import { deriveCombinedToolHistory, deriveStageToolHistory, deriveStageJournalToolHistory } from './stage-history.js'
+import { stageDialogueEvidence, resolveEvidenceQuotes } from './stage-graph.js'
+import { parseStageAutoMessage } from './stage-auto-message.mjs'
+import { parseCharacterAutoMessage } from './character-auto-message.mjs'
 
 const MAX_ARCHIVE = 40 * 1024 * 1024
 const MAX_JSONL = 20 * 1024 * 1024
@@ -71,31 +74,37 @@ export function inspectDialogue(buffer, name = '', options = {}) {
   try { source = new TextDecoder('utf-8', { fatal: true }).decode(data) }
   catch { throw new Error(`${name} 不是有效的 UTF-8 日志。`) }
   const lines = source.split(/\r?\n/), dialogue = [], recordIds = [], playerRecordIds = []
-  let stagedHistory = null
+  let stagedHistory = null, stagedEvents = null
   let uncertainToolOutcomes = 0
   if (options.stageGraph) {
-    let stagedEvents
     try { stagedEvents = lines.filter(line => line.trim()).map(line => JSON.parse(line)) }
     catch { throw new Error(`${name} 不是有效的 DSH JSONL 日志。`) }
     const noteUnknown = () => { uncertainToolOutcomes++ }
-    try { stagedHistory = options.characterConfig ? deriveCombinedToolHistory(stagedEvents, options.stageGraph, options.characterConfig, noteUnknown).stages : deriveStageToolHistory(stagedEvents, options.stageGraph, noteUnknown) }
+    try { stagedHistory = options.allowStageCorrections === true ? deriveStageJournalToolHistory(stagedEvents, options.stageGraph, options.characterConfig || null).stages : options.characterConfig ? deriveCombinedToolHistory(stagedEvents, options.stageGraph, options.characterConfig, noteUnknown).stages : deriveStageToolHistory(stagedEvents, options.stageGraph, noteUnknown) }
     catch { throw new Error(`${name} 的阶段工具记录不完整或与剧本规则不一致，请人工核对。`) }
   }
   const dialogueHash = createHash('sha256')
   let sawFirstDialogue = false
   const interruptedAssistantSeqs = []
   const uncertainMixedSeqs = []
+  const internalStageAutoSeqs = []
+  const internalCharacterAutoSeqs = []
   const assistantTurns = new Map(), abortedTurns = new Set()
   const turnStarts = new Map(), turnEnds = new Map()
   let lastParticipantRole = null
   let lastDialogueSeq = -1
   const playCommands = new Map(), completedPlays = []
+  const priorEvents = []
   let playPolicy = null
   for (const line of lines) {
     if (!line.trim()) continue
     let event
     try { event = JSON.parse(line) } catch { throw new Error(`${name} 不是有效的 DSH JSONL 日志。`) }
     if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error(`${name} 含无效的日志记录。`)
+    // Only physical predecessors may support an internal candidate; a forged
+    // later event must not become prior evidence merely by using a low seq.
+    const predecessorCount = priorEvents.length
+    if (options.stageGraph) priorEvents.push(event)
     if ((event.type === 'turn/start' || event.type === 'turn/end') && Number.isSafeInteger(event.data?.turn)) {
       const map = event.type === 'turn/start' ? turnStarts : turnEnds
       const entries = map.get(event.data.turn) || []
@@ -132,6 +141,28 @@ export function inspectDialogue(buffer, name = '', options = {}) {
     // DSH writes a runtime-environment snapshot as a user-role message; it is
     // not dialogue and may contain local paths, so never send it to a judge.
     if (event.type === 'user/message' && event.data?.source?.kind === 'runtime-context' && event.data.source.form === 'snapshot') continue
+    if (event.type === 'user/message' && event.data?.source?.kind === 'trpg-stage-auto') {
+      const request = options.stageGraph && parseStageAutoMessage(event,options.stageGraph)
+      try {
+        if (!request || !Number.isSafeInteger(event.seq)) throw Error('invalid')
+        const prior=priorEvents.slice(0,predecessorCount).filter(e=>Number.isSafeInteger(e?.seq)&&e.seq<event.seq)
+        resolveEvidenceQuotes(request.quotes,stageDialogueEvidence(prior))
+      } catch { throw new Error(`${name} 的后台阶段候选记录无效，请人工核对。`) }
+      internalStageAutoSeqs.push(event.seq)
+      continue
+    }
+    if (event.type === 'user/message' && event.data?.source?.kind === 'trpg-character-auto') {
+      const request = options.characterConfig && parseCharacterAutoMessage(event,options.characterConfig)
+      try {
+        if (!request || !Number.isSafeInteger(event.seq)) throw Error('invalid')
+        const prior=priorEvents.slice(0,predecessorCount).filter(e=>Number.isSafeInteger(e?.seq)&&e.seq<event.seq)
+        const events=stageDialogueEvidence(prior)
+        const ids=resolveEvidenceQuotes(request.quotes,events)
+        if(!ids.some(id=>events.some(e=>e.seq===id&&e.role==='assistant')))throw Error('invalid')
+      } catch {throw new Error(`${name} 的后台角色候选记录无效，请人工核对。`)}
+      internalCharacterAutoSeqs.push(event.seq)
+      continue
+    }
     if (event.type === 'user/message' && event.data?.source?.kind !== 'user') {
       throw new Error(`${name} 含来源不明或非玩家发言，不能静默忽略，请人工核对。`)
     }
@@ -197,7 +228,7 @@ export function inspectDialogue(buffer, name = '', options = {}) {
     return starts.length === 1 && ends.length === 1 && Number.isSafeInteger(starts[0]) && Number.isSafeInteger(ends[0]) && starts[0] <= ends[0]
       ? { turn, start: starts[0], end: ends[0] } : { turn }
   })
-  return { dialogue: text, dialogueFingerprint: dialogueHash.digest('hex'), recordIds, playerRecordIds, uncertainMixedSeqs, interruptedAssistantSeqs, abortedTurns: [...abortedTurns], abortedTurnRanges, lastPlayerUnanswered: lastParticipantRole === '玩家', scenarioId: completedPlays.length === 1 ? completedPlays[0].id : null, versionHash: completedPlays.length === 1 ? completedPlays[0].hash : null, playPolicy, ...(stagedHistory ? { stagedTransitionCount: stagedHistory.length, uncertainToolOutcomes } : {}) }
+  return { dialogue: text, dialogueFingerprint: dialogueHash.digest('hex'), recordIds, playerRecordIds, uncertainMixedSeqs, internalStageAutoSeqs, internalCharacterAutoSeqs, interruptedAssistantSeqs, abortedTurns: [...abortedTurns], abortedTurnRanges, lastPlayerUnanswered: lastParticipantRole === '玩家', scenarioId: completedPlays.length === 1 ? completedPlays[0].id : null, versionHash: completedPlays.length === 1 ? completedPlays[0].hash : null, playPolicy, ...(stagedHistory ? { stagedTransitionCount: stagedHistory.filter(item => item.kind !== 'correction').length, stageCorrectionCount: stagedHistory.filter(item => item.kind === 'correction').length, uncertainToolOutcomes } : {}) }
 }
 
 export function extractDialogue(buffer, name = '') { return inspectDialogue(buffer, name).dialogue }

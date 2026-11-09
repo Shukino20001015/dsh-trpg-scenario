@@ -7,17 +7,25 @@ import { importPack, listScenarios, parseManifest, parsePublicCriteria, parseSco
 import { inspectDialogue, inspectScenarioReference, playerInputsFromJudgeRequest } from './judge-log.js'
 import { auditGroupReports, canonicalizeEvidenceReferences, completenessReviewWarning, coverageClaimReviewWarning, findExplicitTextConflicts, formatAuditedScores, playerEvidenceReviewWarnings, playerQuoteReviewWarnings, parseScoreReport } from './judge-report.js'
 import { readSnapshot, saveSnapshot, snapshotHash, snapshotPolicy } from './snapshot-store.js'
-import { parseStageGraph, publicStageState } from './stage-graph.js'
-import { createStageRuntime, STAGE_CONTRACT, STAGE_RULES } from './stage-tool.js'
+import { parseStageGraph, publicStageState, stageDialogueEvidence } from './stage-graph.js'
+import { createStageRuntime, STAGE_CONTRACT, STAGE_RULES, STAGE_CORRECTION_CONTRACT, STAGE_CORRECTION_RULES } from './stage-tool.js'
 import { installStageRuntime } from './stage-install.js'
 import { readStageState, stageSuspended, suspendStage } from './stage-store.js'
-import { deriveStageToolHistory, deriveCombinedToolHistory, validateAmbiguousCombinedRecovery, interruptedStageRecovery, verifyStageToolHistory, verifyCombinedToolHistory, characterSourceQuotes } from './stage-history.js'
+import { deriveStageToolHistory, deriveCombinedToolHistory, deriveStageJournalToolHistory, validateAmbiguousStageJournalRecovery, verifyStageJournalToolHistory, validateAmbiguousCombinedRecovery, interruptedStageRecovery, verifyStageToolHistory, verifyCombinedToolHistory, characterSourceQuotes } from './stage-history.js'
+import { publicStageJournalState } from './stage-correction.mjs'
+import { reviewStageCorrection } from './stage-correction-review.mjs'
 import { parseCharacterConfig, publicCharacterState } from './character-state.js'
 import { readCharacterState } from './character-store.js'
 import { CHARACTER_RULES, characterProtocolSupported, createCharacterRuntime } from './character-tool.js'
 import { runSegmentedPipeline } from './segmented-pipeline.mjs'
 import { readSessionEvents } from './session-history.js'
-import { startSegmentedJob, finishSegmentedJob, readSegmentedJob, listSegmentedJobIds } from './segmented-job-store.js'
+import { startSegmentedJob, finishSegmentedJob, readSegmentedJob, listSegmentedJobIds, safeJobLabel } from './segmented-job-store.js'
+import { reviewStageTransition } from './stage-semantic-review.mjs'
+import { makeStageReviewModel, makeStageCorrectionReviewModel, makeStageExtractModel, makeCharacterReviewModel, makeCharacterExtractModel } from './stage-review-llm.mjs'
+import { createStageAutoBackground } from './stage-auto-background.mjs'
+import { stageAutoMessage } from './stage-auto-message.mjs'
+import { createCharacterAutoBackground } from './character-auto-background.mjs'
+import { characterAutoMessage } from './character-auto-message.mjs'
 
 export const name = 'dsh-trpg-scenario'
 export const inject = ['commands', 'attachments', 'connection', 'sessionController', 'llm', 'agentDefaultModel']
@@ -50,17 +58,18 @@ const JUDGE_SPEAKERS = '【发言与行动主体核对】记录标签区分“�
 // adding review guidance must not make already recorded games unscoreable.
 const JUDGE_FACT_LINKS = '【事实归属与先后核对】提及价格、承诺、人物关系、消息和事件时，核对同一条证据中的具体主体、接收方与时间顺序；不同公司、岗位、人物和渠道不能因数字相似就合并。先确认是谁在何处提出，才写“某公司给出某条件”；玩家行动发生在对方回应之前时，不得写成“面对该回应作出行动”。找不到可靠对应时写主体或先后未能确认，不能靠推测补齐。主持代写与玩家指令矛盾时，明确区分两者，不把模型自行改写当作玩家主动改正。玩家指出主持误写且主持明确更正时，要同时核对原行动、误写与更正：不得把已撤回的误写作为玩家的决定或保留其直接错误后果；仅提出异议但未解决的，标记争议，不自行裁定。更正不自动推翻与误写无关的独立事实，也不要将撤回前的旧回应与更正后的新回应混为一谈。引用编号存在不代表它支持你的叙述；报告生成后仍须由组织者人工核对。'
 const STAGE_PROTOCOL = Object.freeze({ contract: STAGE_CONTRACT, rules: STAGE_RULES, overview: JUDGE_OVERVIEW, speakers: JUDGE_SPEAKERS })
+const STAGE_PROTOCOL_V2 = Object.freeze({ contract: STAGE_CORRECTION_CONTRACT, rules: `${STAGE_RULES}\n${STAGE_CORRECTION_RULES}`, overview: JUDGE_OVERVIEW, speakers: JUDGE_SPEAKERS })
 const CHARACTER_PROTOCOL = Object.freeze({ contract: 'trpg-character-tool-v1', rules: CHARACTER_RULES })
 
 function playPolicy(sc) {
   return snapshotPolicy(sc, PLAY_CONTINUITY)
 }
-function versionHash(sc) {
-  return snapshotHash(frozenSnapshot(sc))
+function versionHash(sc, corrections = false) {
+  return snapshotHash(frozenSnapshot(sc, corrections))
 }
-function frozenSnapshot(sc) { return { sc, continuity: PLAY_CONTINUITY, judgeBase: JUDGE_BASE, ...(sc.stageGraph ? { stageProtocol: STAGE_PROTOCOL } : {}), ...(sc.characterConfig ? { characterProtocol: CHARACTER_PROTOCOL } : {}) } }
+function frozenSnapshot(sc, corrections = false) { return { sc, continuity: PLAY_CONTINUITY, judgeBase: JUDGE_BASE, ...(sc.stageGraph ? { stageProtocol: corrections ? STAGE_PROTOCOL_V2 : STAGE_PROTOCOL } : {}), ...(sc.characterConfig ? { characterProtocol: CHARACTER_PROTOCOL } : {}) } }
 function matchesVersion(sc, expected) {
-  try { return Boolean(sc) && versionHash(sc) === expected } catch { return false }
+  try { return Boolean(sc) && (versionHash(sc) === expected || (sc.stageGraph && versionHash(sc, true) === expected)) } catch { return false }
 }
 
 export async function selectJudgeScenario(selectedId, references, load) {
@@ -130,7 +139,86 @@ function findSavedPolicy(log, startMarker, endMarker) {
 export const findSavedJudgePolicy = log => findSavedPolicy(log, POLICY_START, POLICY_END)
 export const findSavedPlayPolicy = log => findSavedPolicy(log, PLAY_POLICY_START, PLAY_POLICY_END)
 
+// Opt-in only. Missing selections and model errors fail the transition
+// rather than silently falling back to an unreviewed write.
+export function stageReviewerFor(ctx, config, agent) {
+  if (config.experimentalStageReview !== true) return null
+  return async (input, signal) => {
+    let selection = [...agent.session.log].reverse().find(e => e.type === 'model/selection')?.data
+    if (!selection && typeof ctx.agentDefaultModel?.currentSelection === 'function') selection = ctx.agentDefaultModel.currentSelection()
+    const review = makeStageReviewModel({llm:ctx.llm, provider:selection?.provider, model:selection?.model, reasoningEffort:selection?.reasoningEffort})
+    return reviewStageTransition({...input, review, signal})
+  }
+}
+
 export function apply(ctx, config = {}) {
+  const stageReviewer = agent => stageReviewerFor(ctx, config, agent)
+  const correctionReviewer = agent => async (input, signal) => {
+    let selection = [...agent.session.log].reverse().find(event => event.type === 'model/selection')?.data
+    if (!selection && typeof ctx.agentDefaultModel?.currentSelection === 'function') selection = ctx.agentDefaultModel.currentSelection()
+    const review = makeStageCorrectionReviewModel({ llm: ctx.llm, provider: selection?.provider, model: selection?.model, reasoningEffort: selection?.reasoningEffort })
+    return reviewStageCorrection({ ...input, review, signal })
+  }
+  const characterReviewer = agent => config.experimentalCharacterReview === true ? async ({config:characterConfig,state,events,request},signal) => {
+    let selection=[...agent.session.log].reverse().find(e=>e.type==='model/selection')?.data
+    if(!selection && typeof ctx.agentDefaultModel?.currentSelection==='function')selection=ctx.agentDefaultModel.currentSelection()
+    const model=makeCharacterReviewModel({llm:ctx.llm,provider:selection?.provider,model:selection?.model,reasoningEffort:selection?.reasoningEffort})
+    const field=characterConfig.fields.find(f=>f.id===request.field)
+    if(!field || typeof state.values?.[request.field]!=='string')throw Error('角色字段不可用')
+    return model({field:field.label,previous:state.values[request.field],value:request.value,quote:request.quotes[0],quotes:request.quotes,dialogue:events},signal)
+  } : null
+  const automaticStages = new Map()
+  const automaticCharacters = new Map()
+  function registerAutomaticCharacter(agent,runtime,characterConfig){
+    if(config.experimentalAutoCharacter!==true||config.experimentalCharacterReview!==true||automaticCharacters.has(agent)||automaticCharacters.size>=8)return
+    const selection=()=>{let chosen=[...agent.session.log].reverse().find(e=>e.type==='model/selection')?.data;if(!chosen&&typeof ctx.agentDefaultModel?.currentSelection==='function')chosen=ctx.agentDefaultModel.currentSelection();return {llm:ctx.llm,provider:chosen?.provider,model:chosen?.model,reasoningEffort:chosen?.reasoningEffort}}
+    const background=createCharacterAutoBackground({extract:(input,signal)=>makeCharacterExtractModel(selection())(input,signal),review:(input,signal)=>makeCharacterReviewModel(selection())(input,signal)})
+    automaticCharacters.set(agent,{runtime,characterConfig,background})
+  }
+  if(typeof ctx.on==='function'&&config.experimentalAutoCharacter===true&&config.experimentalCharacterReview===true){
+    ctx.on('agent/turn-stopping',({agent})=>{const entry=automaticCharacters.get(agent);if(!entry)return;try{entry.background.start({session:agent.session.id,config:entry.characterConfig,state:entry.runtime.current(),events:stageDialogueEvidence(agent.session.log)})}catch{/* never interrupt the story */}})
+    ctx.on('agent/pre-step',async({agent,step,signal},next)=>{
+      const decision=await next(),entry=automaticCharacters.get(agent)
+      if(!entry||step!==1||signal?.aborted||decision?.kind!=='enter'||!Array.isArray(decision.messages))return decision
+      try{
+        const result=entry.background.take({session:agent.session.id,state:entry.runtime.current(),events:stageDialogueEvidence(agent.session.log)})
+        if(result.status!=='ready'||result.result?.status!=='candidate')return decision
+        const {expectedRevision,field,value,quotes}=result.result
+        return {...decision,messages:[...decision.messages,{id:randomUUID(),role:'user',source:{kind:'trpg-character-auto'},content:[{type:'text',text:characterAutoMessage({expectedRevision,field,value,quotes})}]}]}
+      }catch{return decision}
+    })
+    ctx.on('agent/disposed',({agent})=>{const entry=automaticCharacters.get(agent);if(entry){entry.background.close();automaticCharacters.delete(agent)}})
+    ctx.effect?.(()=>()=>{for(const entry of automaticCharacters.values())entry.background.close();automaticCharacters.clear()})
+  }
+  function registerAutomaticStage(agent, runtime, graph) {
+    if (config.experimentalAutoStage !== true || config.experimentalStageReview !== true || automaticStages.has(agent) || automaticStages.size >= 8) return
+    const selection = () => {
+      let chosen = [...agent.session.log].reverse().find(e => e.type === 'model/selection')?.data
+      if (!chosen && typeof ctx.agentDefaultModel?.currentSelection === 'function') chosen = ctx.agentDefaultModel.currentSelection()
+      return {llm:ctx.llm,provider:chosen?.provider,model:chosen?.model,reasoningEffort:chosen?.reasoningEffort}
+    }
+    const background = createStageAutoBackground({extract:(input,signal)=>makeStageExtractModel(selection())(input,signal),review:(input,signal)=>makeStageReviewModel(selection())(input,signal)})
+    automaticStages.set(agent,{runtime,graph,background})
+  }
+  if (typeof ctx.on === 'function' && config.experimentalAutoStage === true && config.experimentalStageReview === true) {
+    ctx.on('agent/turn-stopping', ({agent}) => {
+      const entry=automaticStages.get(agent)
+      if (!entry) return
+      try { entry.background.start({session:agent.session.id,graph:entry.graph,state:entry.runtime.current(),events:stageDialogueEvidence(agent.session.log)}) } catch { /* never interrupt the story */ }
+    })
+    ctx.on('agent/pre-step', async ({agent,step,signal},next) => {
+      const decision=await next(), entry=automaticStages.get(agent)
+      if (!entry || step!==1 || signal?.aborted || decision?.kind!=='enter' || !Array.isArray(decision.messages)) return decision
+      try {
+        const result=entry.background.take({session:agent.session.id,state:entry.runtime.current(),events:stageDialogueEvidence(agent.session.log)})
+        if(result.status!=='ready'||result.result?.status!=='candidate') return decision
+        const request=result.result.request
+        return {...decision,messages:[...decision.messages,{id:randomUUID(),role:'user',source:{kind:'trpg-stage-auto'},content:[{type:'text',text:stageAutoMessage(request)}]}]}
+      } catch { return decision }
+    })
+    ctx.on('agent/disposed', ({agent}) => {const entry=automaticStages.get(agent);if(entry){entry.background.close();automaticStages.delete(agent)}})
+    ctx.effect?.(()=>()=>{for(const entry of automaticStages.values())entry.background.close();automaticStages.clear()})
+  }
   const root = config.root ?? (process.env.DSH_TRPG_ROOT || join(homedir(), '.dsh', 'trpg', 'scenarios'))
   const startingSessions = new WeakSet()
   const segmentedProgress = new Map()
@@ -150,9 +238,14 @@ export function apply(ctx, config = {}) {
 
   // This validator is used only on paths that keep all tracking tools off.
   // Never use its alternative histories to display a stage or score a game.
-  function validateCombinedForSuspension(log, scenario) {
-    try { deriveCombinedToolHistory(log, scenario.stageGraph, scenario.characterConfig) }
-    catch { validateAmbiguousCombinedRecovery(log, scenario.stageGraph, scenario.characterConfig) }
+  function validateCombinedForSuspension(log, scenario, corrections = false) {
+    if (corrections) {
+      try { deriveStageJournalToolHistory(log, scenario.stageGraph, scenario.characterConfig || null) }
+      catch { validateAmbiguousStageJournalRecovery(log, scenario.stageGraph, scenario.characterConfig || null) }
+    } else if (scenario.characterConfig) {
+      try { deriveCombinedToolHistory(log, scenario.stageGraph, scenario.characterConfig) }
+      catch { validateAmbiguousCombinedRecovery(log, scenario.stageGraph, scenario.characterConfig) }
+    } else deriveStageToolHistory(log, scenario.stageGraph)
   }
 
   async function installedNames() {
@@ -236,7 +329,7 @@ export function apply(ctx, config = {}) {
     for (const id of await installedNames()) {
       try {
         const sc = await loadScenario(join(root, id))
-        list.push({ id, title: sc.meta.title || id, kind: sc.meta.kind || '', minutes: sc.meta.minutes || '', time: sc.meta.time || '', place: sc.meta.place || '', pressure: sc.meta.pressure || '', opening: sc.opening, player: sc.player, criteria: sc.criteria, ...(sc.stageGraph ? { stage: publicStageState(sc.stageGraph, []) } : {}), versionHash: versionHash(sc) })
+        list.push({ id, title: sc.meta.title || id, kind: sc.meta.kind || '', minutes: sc.meta.minutes || '', time: sc.meta.time || '', place: sc.meta.place || '', pressure: sc.meta.pressure || '', opening: sc.opening, player: sc.player, criteria: sc.criteria, ...(sc.stageGraph ? { stage: { ...publicStageState(sc.stageGraph, []), ...(config.experimentalStageCorrection === true ? { correctionSupported: true } : {}) }, tracking: { stageAuto: config.experimentalAutoStage === true && config.experimentalStageReview === true, characterConfigured: !!sc.characterConfig, characterEnabled: !!config.experimentalCharacter, characterAuto: !!sc.characterConfig && !!config.experimentalCharacter && config.experimentalAutoCharacter === true && config.experimentalCharacterReview === true } } : {}), versionHash: versionHash(sc, config.experimentalStageCorrection === true) })
       } catch { unreadableCount++ /* Do not disclose unsafe files or their contents. */ }
     }
     return { ...ok(JSON.stringify(list)), unreadableCount }
@@ -393,22 +486,21 @@ export function apply(ctx, config = {}) {
     if (!policy && savedPolicy?.includes('【TRPG 阶段化剧本】') && !stagedScenario?.stageGraph) throw new Error('阶段剧本原版快照不可用，无法安全恢复。')
     if (!policy && stagedScenario?.stageGraph) {
       const frozenProtocol = stageSnapshot?.stageProtocol
-      const compatible = frozenProtocol?.contract === STAGE_CONTRACT
+      const corrections = frozenProtocol?.contract === STAGE_CORRECTION_CONTRACT
+      const compatible = frozenProtocol?.contract === STAGE_CONTRACT || corrections
       let runtime
       if (await stageSuspended(root, agent.session.id, begin.hash)) {
-        if (stagedScenario.characterConfig) validateCombinedForSuspension(agent.session.log, stagedScenario)
-        else deriveStageToolHistory(agent.session.log, stagedScenario.stageGraph)
+        validateCombinedForSuspension(agent.session.log, stagedScenario, corrections)
         isolateTools(agent)
         agent.ctx.systemPrompt.section({ name: 'trpg/stage-recovery', order: 101, text: `本局阶段追踪此前已暂停，不能因旧记录恢复而自动重启。不要声称新的阶段已确认，不要要求玩家修复；根据已有对话自然继续游戏，不主动给玩家决策建议。剧本总体目标：${stagedScenario.stageGraph.goal}` })
       } else try {
-        runtime = await createStageRuntime({ root, hash: begin.hash, graph: stagedScenario.stageGraph, agent, resume: true, ...(compatible ? { rules: frozenProtocol.rules } : {}) })
+        runtime = await createStageRuntime({ root, hash: begin.hash, graph: stagedScenario.stageGraph, agent, resume: true, reviewTransition:stageReviewer(agent), ...(compatible ? { rules: frozenProtocol.rules } : {}), ...(corrections ? { allowCorrections: true, reviewCorrection: correctionReviewer(agent) } : {}) })
       } catch (error) {
         if (error?.code !== 'ENOENT') throw error
         // With no sidecar, do not reconstruct a state and pretend that the
         // hard gate still protects it. Permit only structurally verifiable
         // stage-tool history, then resume the conversation without any tools.
-        if (stagedScenario.characterConfig) validateCombinedForSuspension(agent.session.log, stagedScenario)
-        else deriveStageToolHistory(agent.session.log, stagedScenario.stageGraph)
+        validateCombinedForSuspension(agent.session.log, stagedScenario, corrections)
         await suspendStage(root, agent.session.id, begin.hash)
         isolateTools(agent)
         agent.ctx.systemPrompt.section({ name: 'trpg/stage-recovery', order: 101, text: `本局阶段记录缺失，程序状态无法核实，阶段工具已暂停。不要声称新的阶段已确认，不要要求玩家修复；根据已有对话自然继续游戏，不主动给玩家决策建议。剧本总体目标：${stagedScenario.stageGraph.goal}` })
@@ -416,15 +508,18 @@ export function apply(ctx, config = {}) {
       if (runtime && stagedScenario.characterConfig) {
         try {
           if (!compatible || !config.experimentalCharacter || !characterProtocolSupported(stageSnapshot?.characterProtocol)) throw new Error('阶段或主角状态协议不可用')
-          const character = await createCharacterRuntime({ root, session: agent.session.id, hash: begin.hash, config: stagedScenario.characterConfig, agent, resume: true, rules: stageSnapshot.characterProtocol.rules })
-          verifyCombinedToolHistory(agent.session.log, stagedScenario.stageGraph, runtime.current().history, stagedScenario.characterConfig, character.current().history)
+          const character = await createCharacterRuntime({ root, session: agent.session.id, hash: begin.hash, config: stagedScenario.characterConfig, agent, resume: true, rules: stageSnapshot.characterProtocol.rules, reviewCharacter:characterReviewer(agent) })
+          if (corrections) verifyStageJournalToolHistory(agent.session.log, stagedScenario.stageGraph, runtime.current().history, stagedScenario.characterConfig, character.current().history)
+          else verifyCombinedToolHistory(agent.session.log, stagedScenario.stageGraph, runtime.current().history, stagedScenario.characterConfig, character.current().history)
           installStageRuntime(agent, runtime, character)
+          registerAutomaticStage(agent,runtime,stagedScenario.stageGraph)
+          registerAutomaticCharacter(agent,character,stagedScenario.characterConfig)
         } catch {
           // A missing or mismatched sidecar may be downgraded to tool-free
           // play, but an unrelated or malformed tool transcript must not be
           // silently accepted on the first resume (subsequent resumes already
           // perform this structural check via the suspension branch).
-          validateCombinedForSuspension(agent.session.log, stagedScenario)
+          validateCombinedForSuspension(agent.session.log, stagedScenario, corrections)
           await suspendStage(root, agent.session.id, begin.hash)
           isolateTools(agent)
           agent.ctx.systemPrompt.section({ name: 'trpg/stage-recovery', order: 101, text: '阶段或主角状态记录无法安全核对，两项追踪已暂停。不要声称状态更新已确认，不要要求玩家处理；依据已有对话自然继续。' })
@@ -433,8 +528,9 @@ export function apply(ctx, config = {}) {
       }
       if (runtime) {
       try {
-        verifyStageToolHistory(agent.session.log, runtime.current().history)
-        if (compatible) installStageRuntime(agent, runtime)
+        if (corrections) verifyStageJournalToolHistory(agent.session.log, stagedScenario.stageGraph, runtime.current().history)
+        else verifyStageToolHistory(agent.session.log, runtime.current().history)
+        if (compatible) { installStageRuntime(agent, runtime); registerAutomaticStage(agent,runtime,stagedScenario.stageGraph) }
         else {
           // Pre-protocol stage sessions (or a future incompatible contract)
           // cannot safely claim the current gate has their frozen rules.
@@ -443,6 +539,12 @@ export function apply(ctx, config = {}) {
           agent.ctx.systemPrompt.section({ name: 'trpg/stage-recovery', order: 101, text: `本局阶段规则版本不可核实或不兼容，阶段工具已暂停。不要声称新阶段已确认，不要要求玩家修复；按已有对话自然继续，不主动给决策建议。剧本总体目标：${stagedScenario.stageGraph.goal}\n此前已确认的阶段：${JSON.stringify(publicStageState(stagedScenario.stageGraph, runtime.current().history))}` })
         }
       } catch (error) {
+        if (corrections) {
+          validateCombinedForSuspension(agent.session.log, stagedScenario, true)
+          await suspendStage(root, agent.session.id, begin.hash)
+          isolateTools(agent)
+          agent.ctx.systemPrompt.section({ name: 'trpg/stage-recovery', order: 101, text: '阶段记录有一次中断，程序状态无法确认，阶段追踪已暂停。请依据对话自然继续，不声称状态更新已确认。' })
+        } else {
         // Only a specifically verified DSH interruption may degrade safely;
         // unknown tools and malformed history still fail closed. Do not expose
         // the sidecar's uncertain stage or permit new stage writes.
@@ -450,6 +552,7 @@ export function apply(ctx, config = {}) {
         await suspendStage(root, agent.session.id, begin.hash)
         isolateTools(agent)
         agent.ctx.systemPrompt.section({ name: 'trpg/stage-recovery', order: 101, text: `阶段记录有一次中断，程序状态暂不可确认，阶段工具已暂停。不要声称发生阶段切换，不要要求玩家修复；根据已发生的对话自然继续游戏，不主动给玩家决策建议。剧本总体目标：${stagedScenario.stageGraph.goal}\n此前已确认的阶段：${JSON.stringify(publicStageState(stagedScenario.stageGraph, confirmed))}` })
+        }
       }
       }
     } else {
@@ -516,19 +619,21 @@ export function apply(ctx, config = {}) {
     try { requireId(match[1]); sc = await loadScenario(join(root, match[1])) }
     catch { return err('剧本不存在或缺少文件。') }
     if (sc.characterConfig && !config.experimentalCharacter) return err('该剧本的主角状态功能仍在开发中，暂不能开局。')
-    if (versionHash(sc) !== match[2]) return err('剧本已发生变化，请刷新后重新选择。')
+    if (versionHash(sc, config.experimentalStageCorrection === true) !== match[2]) return err('剧本已发生变化，请刷新后重新选择。')
     if (!cleanSession(agent)) return err('请在新的独立会话中开局。')
     if ([sc.system, sc.setting, sc.opening, sc.player].some(text => [PLAY_POLICY_START, PLAY_POLICY_END, POLICY_START, POLICY_END].some(marker => text.includes(marker)))) return err('剧本包含保留的规则分隔符。')
     try {
-      await saveSnapshot(root, match[2], frozenSnapshot(sc))
-      let releaseStage
+      await saveSnapshot(root, match[2], frozenSnapshot(sc, config.experimentalStageCorrection === true))
+      let releaseStage, stageRuntime, characterRuntime
       if (sc.stageGraph) {
-        const runtime = await createStageRuntime({ root, hash: match[2], graph: sc.stageGraph, agent })
-        const character = sc.characterConfig ? await createCharacterRuntime({ root, session: agent.session.id, hash: match[2], config: sc.characterConfig, agent }) : null
+        const runtime = stageRuntime = await createStageRuntime({ root, hash: match[2], graph: sc.stageGraph, agent, reviewTransition:stageReviewer(agent), ...(config.experimentalStageCorrection === true ? { allowCorrections: true, reviewCorrection: correctionReviewer(agent) } : {}) })
+        const character = characterRuntime = sc.characterConfig ? await createCharacterRuntime({ root, session: agent.session.id, hash: match[2], config: sc.characterConfig, agent, reviewCharacter:characterReviewer(agent) }) : null
         releaseStage = installStageRuntime(agent, runtime, character)
       } else isolateTools(agent)
       try { agent.ctx.systemPrompt.section({ name: 'trpg/play', order: 100, text: playPolicy(sc) }) }
       catch (error) { if (releaseStage) releaseStage(); throw error }
+      if (stageRuntime) registerAutomaticStage(agent,stageRuntime,sc.stageGraph)
+      if (characterRuntime) registerAutomaticCharacter(agent,characterRuntime,sc.characterConfig)
       return ok(renderCard(sc))
     } catch (e) { return err(`无法安全开始：${e.message}`) }
     } finally { startingSessions.delete(agent.session) }
@@ -544,20 +649,22 @@ export function apply(ctx, config = {}) {
         try {
           if (await stageSuspended(root, agent.session.id, begin.hash)) return { stageUnavailable: true }
           const snapshot = await savedSnapshot(begin)
-          if (snapshot.stageProtocol?.contract !== STAGE_CONTRACT) return { stageUnavailable: true }
-          const state = await readStageState(root, agent.session.id, begin.hash, sc.stageGraph)
+          const corrections = snapshot.stageProtocol?.contract === STAGE_CORRECTION_CONTRACT
+          if (snapshot.stageProtocol?.contract !== STAGE_CONTRACT && !corrections) return { stageUnavailable: true }
+          const state = await readStageState(root, agent.session.id, begin.hash, sc.stageGraph, { allowCorrections: corrections })
           // A sidecar write can succeed immediately before the DSH tool result
           // is interrupted. Never present that ambiguous write as confirmed.
           if (sc.characterConfig) {
             if (!config.experimentalCharacter || !characterProtocolSupported(snapshot.characterProtocol)) return { stageUnavailable: true, characterUnavailable: true }
             const character = await readCharacterState(root, agent.session.id, begin.hash, sc.characterConfig)
-            const sources = characterSourceQuotes(agent.session.log, sc.stageGraph, state.history, sc.characterConfig, character.history)
+            const sources = characterSourceQuotes(agent.session.log, sc.stageGraph, state.history, sc.characterConfig, character.history, { allowCorrections: corrections })
             const view = publicCharacterState(sc.characterConfig, character.history)
             view.fields = view.fields.map((field, index) => ({ ...field, ...(sources.has(sc.characterConfig.fields[index].id) ? { sources: sources.get(sc.characterConfig.fields[index].id) } : {}) }))
-            return { stage: publicStageState(sc.stageGraph, state.history), character: view }
+            return { stage: corrections ? { ...publicStageJournalState(sc.stageGraph, state.history), correctionSupported: true } : publicStageState(sc.stageGraph, state.history), character: view }
           }
-          verifyStageToolHistory(agent.session.log, state.history)
-          return { stage: publicStageState(sc.stageGraph, state.history) }
+          if (corrections) verifyStageJournalToolHistory(agent.session.log, sc.stageGraph, state.history)
+          else verifyStageToolHistory(agent.session.log, state.history)
+          return { stage: corrections ? { ...publicStageJournalState(sc.stageGraph, state.history), correctionSupported: true } : publicStageState(sc.stageGraph, state.history) }
         } catch { return { stageUnavailable: true, ...(sc.characterConfig ? { characterUnavailable: true } : {}) } }
       }
       let sc
@@ -593,7 +700,7 @@ export function apply(ctx, config = {}) {
           if (params.get('jobs') === '1') {
             const ids = await listSegmentedJobIds(root)
             const jobs = await Promise.all(ids.map(async session => {
-              try { const job = await getSegmentedJob(session); return { session, status: job?.status || 'unavailable' } }
+              try { const job = await getSegmentedJob(session); return { session, status: job?.status || 'unavailable', ...(job?.label ? { label: job.label } : {}) } }
               catch { return { session, status: 'unavailable' } }
             }))
             return Response.json({ jobs }, { headers })
@@ -649,11 +756,15 @@ export function apply(ctx, config = {}) {
       const chosen = await selectJudgeScenario(nm, inputs.map(input => input.reference), id => loadScenario(join(root, id)))
       const sc = chosen.scenario
       if ([sc.judge, sc.rubric, sc.setting, sc.player, sc.opening, sc.meta.title || '', sc.meta.pressure || ''].some(text => text.includes(POLICY_START) || text.includes(POLICY_END) || text.includes(AUDIT_MARKER))) throw new Error('剧本包含保留的评委规则分隔符，无法安全评分。')
+      let verifiedHash = null
       for (let i = 0; i < inputs.length; i++) {
-        const { name, data } = inputs[i]
-        const result = inspectDialogue(data, `第 ${i + 1} 份记录`, sc.stageGraph ? { stageGraph: sc.stageGraph, ...(sc.characterConfig ? { characterConfig: sc.characterConfig } : {}) } : {})
+        const { name, data, reference } = inputs[i]
+        if (reference?.hash && (!matchesVersion(sc, reference.hash) || (verifiedHash && reference.hash !== verifiedHash))) throw new Error(`第 ${i + 1} 份记录的剧本或评分标准版本不一致，请核对其他记录及当前版本。`)
+        if (reference?.hash) verifiedHash = reference.hash
+        const allowStageCorrections = Boolean(sc.stageGraph && reference?.hash && reference.hash === versionHash(sc, true))
+        const result = inspectDialogue(data, `第 ${i + 1} 份记录`, sc.stageGraph ? { stageGraph: sc.stageGraph, ...(sc.characterConfig ? { characterConfig: sc.characterConfig } : {}), allowStageCorrections } : {})
         if (result.scenarioId && result.scenarioId !== chosen.id) throw new Error(`第 ${i + 1} 份记录显示的剧本编号与实际评分剧本不一致。`)
-        if (result.versionHash && result.versionHash !== versionHash(sc)) throw new Error(`第 ${i + 1} 份记录中的剧本或评分标准版本与当前版本不一致。`)
+        if (result.versionHash && !matchesVersion(sc, result.versionHash)) throw new Error(`第 ${i + 1} 份记录中的剧本或评分标准版本与当前版本不一致。`)
         const expectedPolicy = playPolicy(sc)
         if (result.playPolicy && result.playPolicy !== expectedPolicy) throw new Error(`第 ${i + 1} 份记录中的游玩规则或剧本内容与当前版本不一致。`)
         groups.push({ name, ...result })
@@ -666,8 +777,11 @@ export function apply(ctx, config = {}) {
       const interruptions = groups.map((group, i) => group.interruptedAssistantSeqs.length ? `第 ${i + 1} 份游玩记录中的智能体回复在记录 ${group.interruptedAssistantSeqs.join('、')} 标记为中断，相关内容可能不完整` : null).filter(Boolean)
       const stopped = groups.map((group, i) => group.abortedTurnRanges.length ? `第 ${i + 1} 份游玩记录中止：${group.abortedTurnRanges.map(({ turn, start, end }) => `第 ${turn} 轮${start !== undefined ? `（原始事件 seq ${start}–${end}）` : '（原始事件范围无法确定）'}`).join('、')}；轮次不是对话记录编号，事件范围包含非对话事件` : null).filter(Boolean)
       const uncertainTools = groups.map((group, i) => group.uncertainToolOutcomes ? `第 ${i + 1} 份游玩记录有 ${group.uncertainToolOutcomes} 次阶段或人物状态工具结果不确定，不能据此断定状态已更新或未更新` : null).filter(Boolean)
+      const internalCandidates = groups.map((group,i)=>group.internalStageAutoSeqs.length ? `第 ${i + 1} 份记录包含后台阶段候选（seq ${group.internalStageAutoSeqs.join('、')}），不是玩家发言；记录来源未经认证，须核对原始日志` : null).filter(Boolean)
+      const internalCharacters = groups.map((group,i)=>group.internalCharacterAutoSeqs.length ? `第 ${i + 1} 份记录包含后台角色候选（seq ${group.internalCharacterAutoSeqs.join('、')}），不是玩家发言；记录来源未经认证，须核对原始日志` : null).filter(Boolean)
+      const corrections = groups.map((group, i) => group.stageCorrectionCount ? `第 ${i + 1} 份记录包含 ${group.stageCorrectionCount} 次阶段纠正；工具记录只说明状态变化，须对照更正前后的原始对话核对事实` : null).filter(Boolean)
       const unanswered = groups.map((group, i) => group.lastPlayerUnanswered ? i + 1 : null).filter(Boolean)
-      const dialogueCaveats = [...interruptions, ...stopped, ...uncertainTools, ...(unanswered.length ? [`第 ${unanswered.join('、')} 份游玩记录最后一条对话是玩家发言，未见之后的智能体回复`] : [])]
+      const dialogueCaveats = [...interruptions, ...stopped, ...uncertainTools, ...internalCandidates, ...internalCharacters, ...corrections, ...(unanswered.length ? [`第 ${unanswered.join('、')} 份游玩记录最后一条对话是玩家发言，未见之后的智能体回复`] : [])]
       if (groups.reduce((sum, group) => sum + group.dialogue.length, 0) > 480000) throw new Error('对话记录总量过大，无法完整评分；请勿自行截断关键记录。')
       if (typeof agent.ctx?.systemPrompt?.section !== 'function') throw new Error('当前会话无法安装独立评委规则。')
       isolateTools(agent)
@@ -717,7 +831,7 @@ export function apply(ctx, config = {}) {
     if (sessionId) segmentedProgress.set(sessionId, { phase: 'prepare', completed: 0, total: 0 })
     try {
       const buffer = bufferOverride || await readAttachment(attachments[0], 40 * 1024 * 1024, signal)
-      const result = await runSegmentedPipeline({ root, buffer, llm: ctx.llm, provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort, allowUncertainMixed: true, signal, onProgress: progress => { if (sessionId) segmentedProgress.set(sessionId, progress) }, loadInstalledSnapshot: async id => frozenSnapshot(await loadScenario(join(root, id))) })
+      const result = await runSegmentedPipeline({ root, buffer, llm: ctx.llm, provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort, allowUncertainMixed: true, signal, onProgress: progress => { if (sessionId) segmentedProgress.set(sessionId, progress) }, loadInstalledSnapshot: async id => frozenSnapshot(await loadScenario(join(root, id)), config.experimentalStageCorrection === true) })
       if (result.status !== 'human-review-required') {
         const phases = { prepare: '准备', extract: '分段提取', 'global-review': '逐维复核' }
         const reasons = { 'call-budget': '所需调用超过本次上限', 'global-input-limit': '完整复核输入超过上限', 'extract-failed': '分段模型接口调用失败', 'invalid-response': '模型输出格式无法核验', 'invalid-evidence': '候选引文不能与对应记录逐字匹配', 'review-failed': '模型接口调用失败', 'model-truncated': '模型达到输出上限，内容被截断', 'output-limit': '模型输出超过本插件长度上限', 'stream-incomplete': '模型输出流未完整结束', 'invalid-review': '复核内容或引文无法核验', 'invalid-score': '分数、档位或引用不符合规则', timeout: '模型调用超时', aborted: '任务已中止' }
@@ -745,16 +859,17 @@ export function apply(ctx, config = {}) {
       const buffer = await readAttachment(attachments[0], 40 * 1024 * 1024, signal)
       if (signal?.aborted) return err('评分启动已中止。')
       const frozenAgent = { session: { id, log: structuredClone(agent.session.log) } }
-      await startSegmentedJob(root, id)
-      segmentedJobs.set(id, { status: 'running' })
+      const label = safeJobLabel(attachments[0]?.attachment?.name)
+      await startSegmentedJob(root, id, label)
+      segmentedJobs.set(id, { status: 'running', ...(label ? { label } : {}) })
       Promise.resolve().then(async () => {
         let result
         try { result = await cmdSegmentedJudge(frozenAgent, attachments, undefined, buffer) }
         catch { result = err('评分任务未完成，请保留原日志并重新开始。') }
         const terminal = { status: result.kind === 'success' ? 'complete' : 'failed', text: result.text }
         try { await finishSegmentedJob(root, id, terminal); segmentedJobs.delete(id) }
-        catch { segmentedJobs.set(id, { status: 'failed', text: '评分结果无法安全保存，请保留原日志并重新开始。' }) }
-      }).catch(() => { segmentedJobs.set(id, { status: 'failed', text: '评分任务异常结束，请保留原日志并重新开始。' }) })
+        catch { segmentedJobs.set(id, { status: 'failed', text: '评分结果无法安全保存，请保留原日志并重新开始。', ...(label ? { label } : {}) }) }
+      }).catch(() => { segmentedJobs.set(id, { status: 'failed', text: '评分任务异常结束，请保留原日志并重新开始。', ...(label ? { label } : {}) }) })
       return ok('分段评分任务已启动；可在评委会话查看进度和最终结果。')
     } catch (error) { return err(`无法启动分段评分：${error.message}`) }
   }

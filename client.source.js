@@ -17,6 +17,31 @@ window.__ModuleLoader__.load({
       return message || '操作未完成，请重试。'
     }
 
+    // Start each file once in its own session. An ambiguous command response
+    // must never be retried automatically because the job may already exist.
+    async function startSegmentedBatch(files, { create, upload, execute }) {
+      const results = []
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index]
+        let session = null, phase = 'create'
+        try {
+          session = await create(index, files.length)
+          phase = 'upload'
+          const receipt = await upload(session, file)
+          if (!receipt?.ok || !receipt.value?.receiptId) throw new Error(receipt?.error?.message || '上传失败')
+          phase = 'execute'
+          const response = await execute(session, receipt.value.receiptId)
+          const result = response?.value?.result
+          if (!response?.ok || !result) { results.push({ file: file.name, session, status: 'unknown' }); continue }
+          if (result.kind !== 'success') { results.push({ file: file.name, session, status: 'failed', error: result.text || '启动失败' }); continue }
+          results.push({ file: file.name, session, status: 'started' })
+        } catch (error) {
+          results.push({ file: file.name, session, status: phase === 'execute' ? 'unknown' : 'failed', error: phase === 'execute' ? '' : readableError(error) })
+        }
+      }
+      return results
+    }
+
     const styles = {
       wrap: {
         margin: '0 auto 10px',
@@ -82,7 +107,7 @@ window.__ModuleLoader__.load({
       return h('section', { 'aria-label': '剧本目标与阶段', 'aria-live': 'polite', style: { marginTop: 12, padding: '10px 13px', borderRadius: 10, background: 'rgba(80, 110, 160, 0.07)', fontSize: 13, lineHeight: 1.6 } },
         h('div', null, h('strong', null, '总体目标：'), stage.goal),
         h('div', null, h('strong', null, '当前记录的阶段：'), stage.current),
-        h('div', { style: { opacity: 0.7, fontSize: 12 } }, '阶段由 AI 根据剧情申请更新，可能延迟或有误；如与剧情不符，可直接告诉主持。'),
+        h('div', { style: { opacity: 0.7, fontSize: 12 } }, stage.correctionSupported ? '阶段由 AI 根据剧情申请更新，可能延迟或有误；最近一次误切可告诉主持尝试纠正，结果仍需组织者对照对话核对。' : '阶段由 AI 根据剧情申请更新，可能延迟或有误；如与剧情不符，请告知组织者并以对话为准。当前版本不能直接撤销错误的阶段记录。'),
         stage.visited.length > 1 ? h('details', null,
           h('summary', { style: { cursor: 'pointer', opacity: 0.8 } }, '已走过的阶段'),
           h('ol', { style: { margin: '6px 0 0', paddingLeft: 20 } }, stage.visited.map((name, i) => h('li', { key: i }, name)))) : null)
@@ -145,7 +170,10 @@ window.__ModuleLoader__.load({
         return () => { active = false; clearInterval(timer); document.removeEventListener('visibilitychange', onVisibilityChange) }
       }, [props.sessionId, running, updated])
       if (!result || result.id !== props.sessionId) return null
-      return h(React.Fragment, null, h(StageInfo, { stage: result.stage, unavailable: result.unavailable }), h(CharacterInfo, { character: result.character, unavailable: result.characterUnavailable }),
+      return h(React.Fragment, null,
+        running && (result.unavailable || result.characterUnavailable)
+          ? h('div', { role: 'status', style: styles.hint }, '正在核对阶段和主角状态，请稍候；当前请以对话为准。')
+          : h(React.Fragment, null, h(StageInfo, { stage: result.stage, unavailable: result.unavailable }), h(CharacterInfo, { character: result.character, unavailable: result.characterUnavailable })),
         result.game ? h('details', { style: { marginTop: 8, fontSize: 12 } },
           h('summary', { style: { cursor: 'pointer' } }, '组织者：备份原局评分快照'),
           h('p', null, '快照包含主持人隐藏设定和评分规则，仅供可信评委使用。它不包含对话日志；评分还需要另行导出本局 DSH 日志。'),
@@ -232,12 +260,30 @@ window.__ModuleLoader__.load({
       }, [props?.sessionId, segmentedJob?.status])
       React.useEffect(() => {
         if (current !== null || !props?.sessionId) return
-        let active = true
-        fetch(`api/trpg.view?sessionId=${encodeURIComponent(props.sessionId)}&jobs=1`, { cache: 'no-store' })
-          .then(response => response.ok ? response.json() : null)
-          .then(data => { if (active) setSegmentedJobs(Array.isArray(data?.jobs) ? data.jobs : []) })
-          .catch(() => { if (active) setSegmentedJobs([]) })
-        return () => { active = false }
+        let active = true, pending = false, timer = null
+        const refresh = async () => {
+          if (!active || pending || document.visibilityState === 'hidden') return
+          pending = true
+          let again = false
+          try {
+            const response = await fetch(`api/trpg.view?sessionId=${encodeURIComponent(props.sessionId)}&jobs=1`, { cache: 'no-store' })
+            if (!response.ok) throw new Error('任务列表暂不可用')
+            const data = await response.json()
+            if (!Array.isArray(data?.jobs)) throw new Error('任务列表格式无效')
+            if (active) setSegmentedJobs(data.jobs)
+            again = data.jobs.some(job => job.status === 'running')
+          } catch { again = true }
+          finally {
+            pending = false
+            if (active && again) timer = setTimeout(refresh, 5000)
+          }
+        }
+        const onVisible = () => {
+          if (document.visibilityState === 'visible') { clearTimeout(timer); refresh() }
+        }
+        refresh()
+        document.addEventListener('visibilitychange', onVisible)
+        return () => { active = false; clearTimeout(timer); document.removeEventListener('visibilitychange', onVisible) }
       }, [props?.sessionId, current === null, revision])
       const scenario = catalog.find(item => item.id === selected)
       const pendingCandidates = (sessionList?.ids || []).filter(id => id !== props?.sessionId && sessionList.byId[id]?.blank)
@@ -351,21 +397,24 @@ window.__ModuleLoader__.load({
         finally { setBusy(false); setConfirmedComplete(false) }
       }, [props?.sessionId, selected, newSession, confirmedComplete])
       const segmentedJudgeFile = React.useCallback(async e => {
-        const file = e.target.files?.[0]
+        const files = Array.from(e.target.files || [])
         e.target.value = ''
-        if (!file || !props?.sessionId) return
-        if (file.size > 40 * 1024 * 1024) { setNote('日志不能超过 40 MB'); return }
+        if (!files.length || !props?.sessionId) return
+        if (files.length > 6 || files.some(file => file.size > 40 * 1024 * 1024)) { setNote('请选择不超过 6 份、每份不超过 40 MB 的日志'); return }
         setBusy(true)
         setNote('正在启动分段评分任务…')
         try {
-          const judgeSession = await newSession('AI 跑团 · 分段评分')
-          const upload = await ctx.fileUpload.upload(judgeSession, file, file.name)
-          if (!upload?.ok || !upload.value?.receiptId) throw new Error(upload?.error?.message || '上传失败')
-          const res = await ctx.remote.commands.execute(judgeSession, '/trpg judge-segmented-start', [{ type: 'file', receiptId: upload.value.receiptId }])
-          const result = res?.value?.result
-          if (!res?.ok || !result) throw new Error('评分请求未完成，可能已中断或连接断开；请检查评委会话，保留原日志后重试。')
-          if (result.kind !== 'success') throw new Error(result.text || '分段评分未完成，请保留原日志并检查评委会话。')
-          ctx.uiWorkspace.openSession(judgeSession)
+          const results = await startSegmentedBatch(files, {
+            create: (index, total) => newSession(total === 1 ? 'AI 跑团 · 分段评分' : `AI 跑团 · 分段评分 ${index + 1}/${total}`),
+            upload: (session, file) => ctx.fileUpload.upload(session, file, file.name),
+            execute: (session, receiptId) => ctx.remote.commands.execute(session, '/trpg judge-segmented-start', [{ type: 'file', receiptId }]),
+          })
+          if (results.length === 1 && results[0].status === 'started') ctx.uiWorkspace.openSession(results[0].session)
+          else {
+            const safe = name => String(name || '未命名').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, ' ').slice(0, 120)
+            setNote(results.map(item => `${safe(item.file)}${item.session ? `（任务 ${item.session.slice(-8)}）` : ''}：${item.status === 'started' ? '已启动' : item.status === 'unknown' ? '启动结果未知，请先检查任务，勿重复提交' : `未启动：${item.error || '请检查后重试'}`}`).join('\n'))
+            setRevision(n => n + 1)
+          }
         } catch (error) { setNote(readableError(error)) }
         finally { setBusy(false) }
       }, [props?.sessionId, newSession])
@@ -488,6 +537,11 @@ window.__ModuleLoader__.load({
         pendingCandidates.length > 100 ? h('div', { role: 'alert', style: styles.hint }, '未行动会话过多，当前只检查前 100 个；请先处理其他未行动会话。') : null,
         h('div', { style: styles.stamp }, scenario ? `${scenario.time}　${scenario.place}` : ''),
         h(StageInfo, { stage: scenario?.stage }),
+        scenario?.tracking ? h('div', { style: styles.hint },
+          scenario.tracking.characterConfigured && !scenario.tracking.characterEnabled ? '此剧本需要主角状态功能；当前配置未开启，暂不能开局。' :
+          scenario.tracking.stageAuto || scenario.tracking.characterAuto
+            ? `本局启用了${scenario.tracking.stageAuto && scenario.tracking.characterAuto ? '阶段与主角状态' : scenario.tracking.stageAuto ? '阶段' : '主角状态'}的后台辅助判断，会额外调用当前或默认模型，可能产生费用和延迟；更新可能遗漏或有误，请以对话为准。`
+            : '当前配置未启用阶段或主角状态的后台辅助判断；主持仍可能主动调用工具，更新可能遗漏或有误。') : null,
         scenario?.player ? h('details', { open: true, style: { marginTop: 12 } },
           h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '剧本背景'),
           h('div', { 'data-trpg-markdown': 'player', style: { marginTop: 8, lineHeight: 1.7 } }, renderMarkdown(h, marked, playerBody(scenario.player))))
@@ -508,18 +562,18 @@ window.__ModuleLoader__.load({
           ' 我已逐份核对上传的记录，确认每份都覆盖对应的整局游玩（可选）')),
         h('label', { style: { ...btn, display: 'inline-block', marginLeft: 8, opacity: !selected || busy ? 0.5 : 1 } }, '上传对话日志评分',
           h('input', { type: 'file', accept: '.zip,.jsonl,application/zip', multiple: true, onChange: judgeFiles, disabled: !selected || busy, style: { width: 1, height: 1, opacity: 0, position: 'absolute' }, 'aria-label': '上传对话日志评分' })),
-        h('label', { style: { ...btn, display: 'inline-block', marginLeft: 8, opacity: busy ? 0.5 : 1 } }, '单局分段评分',
-          h('input', { type: 'file', accept: '.zip,.jsonl,application/zip', onChange: segmentedJudgeFile, disabled: busy, style: { width: 1, height: 1, opacity: 0, position: 'absolute' }, 'aria-label': '上传单局日志进行分段评分' })),
-        h('div', { style: styles.hint }, '分段评分一次处理一局，会多次调用当前所选模型并发送完整对话和评委所需剧本内容；需原局快照或摘要完全匹配的已安装版本，可能耗时并产生多次调用费用。草稿仅供组织者审阅，可能泄露未公开剧情；需人工逐项复核，不自动比较或排名。'),
+        h('label', { style: { ...btn, display: 'inline-block', marginLeft: 8, opacity: busy ? 0.5 : 1 } }, '分段评分',
+          h('input', { type: 'file', accept: '.zip,.jsonl,application/zip', multiple: true, onChange: segmentedJudgeFile, disabled: busy, style: { width: 1, height: 1, opacity: 0, position: 'absolute' }, 'aria-label': '上传日志进行分段评分' })),
+        h('div', { style: styles.hint }, '可一次选择最多 6 份日志，每份独立创建任务并多次调用当前所选模型；会发送完整对话和评委所需剧本内容，可能增加耗时和费用。需各局原局快照或摘要完全匹配的已安装版本。草稿仅供组织者审阅，可能泄露未公开剧情；需人工逐项复核并核对版本，不自动比较或排名。'),
         segmentedJobs.length ? h('details', { style: { marginTop: 10, fontSize: 13 } },
           h('summary', { style: { cursor: 'pointer' } }, '组织者：分段评分任务'),
           h('div', { style: styles.hint }, '任务只供组织者查看；编号用于区分不同评分会话。'),
           ...segmentedJobs.map(job => h('div', { key: job.session, style: { marginTop: 6 } },
-            h('button', { type: 'button', style: btn, onClick: () => ctx.uiWorkspace.openSession(job.session) }, `打开任务 ${job.session.slice(-8)} · ${({ running: '进行中', complete: '已完成', failed: '未完成', interrupted: '需检查', unavailable: '不可读取' })[job.status] || '未知'}`)))) : null,
+            h('button', { type: 'button', style: btn, onClick: () => ctx.uiWorkspace.openSession(job.session) }, `${job.label || '未命名日志'} · 任务 ${job.session.slice(-8)} · ${({ running: '进行中', complete: '已完成', failed: '未完成', interrupted: '需检查', unavailable: '不可读取' })[job.status] || '未知'}`)))) : null,
         h('div', { style: styles.hint }, '每份日志对应一次游玩，可上传一份单独评分，也可上传多份进行比较（最多 6 份）。开局与评分分别创建独立会话，沿用当前会话所选模型。评分前请检查日志中的个人信息；AI 评分可能误用证据或给出不合理分数，须对照原始记录和评分标准复核。'),
         // The card can be taller than its scroll viewport; keep errors and
         // results visible after file upload even when the user is near the top.
-        note ? h('div', { role: 'status', 'aria-live': 'polite', style: { position: 'sticky', bottom: 0, zIndex: 2, padding: '9px 12px', borderRadius: 8, border: '1px solid var(--line, #d7dbe0)', background: 'var(--panel, #f7f8fa)', boxShadow: '0 -4px 16px rgba(30, 50, 80, 0.08)', fontSize: 13, lineHeight: 1.6, whiteSpace: 'pre-wrap', marginTop: 8 } }, note) : null,
+        note ? h('div', { role: 'status', 'aria-live': 'polite', style: { position: 'sticky', bottom: 0, zIndex: 2, padding: '9px 12px', borderRadius: 8, border: '1px solid var(--line, #d7dbe0)', background: 'var(--panel, #f7f8fa)', boxShadow: '0 -4px 16px rgba(30, 50, 80, 0.08)', fontSize: 13, lineHeight: 1.6, whiteSpace: 'pre-wrap', marginTop: 8 } }, note, h('button', { type: 'button', onClick: () => setNote(''), style: { ...btn, display: 'block' } }, '关闭提示')) : null,
       )
     }
 

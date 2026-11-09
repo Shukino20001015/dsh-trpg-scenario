@@ -1,5 +1,6 @@
-import { advanceStage, resolveEvidenceQuotes, stageDialogueEvidence } from './stage-graph.js'
+import { advanceStage, resolveEvidenceQuotes, stageDialogueEvidence, validateTransition } from './stage-graph.js'
 import { advanceCharacterState } from './character-state.js'
+import { prepareStageCorrection, replayStageJournal } from './stage-correction.mjs'
 
 // Verify a staged session's tool transcript against its separately persisted
 // history. This checks structural consistency, not truth, tamper resistance or
@@ -67,6 +68,65 @@ function scanStageToolHistory(log, onSuccess, onUnknown = () => {}, onCharacter 
   return success
 }
 
+// V2 replay is separate from V1. A correction is trusted only when the same
+// arguments appear in a complete, successful DSH tool-call/result sequence;
+// the cited text and the corrected revision are reconstructed from prior events.
+export function deriveStageJournalToolHistory(log, graph, config = null) {
+  let stages = [], character = []
+  const failUnknown = () => { throw new Error('阶段或角色工具结果不确定，不能确认历史') }
+  const onCharacter = config ? ({ args, events }) => { character = advanceCharacterState(config, character, args, events).history } : null
+  scanStageToolHistory(log, ({ args, evidence, events }) => {
+    stages = advanceStageJournal(graph, stages, args, evidence, events)
+  }, failUnknown, onCharacter, config ? failUnknown : null)
+  return { stages, character }
+}
+
+function advanceStageJournal(graph, history, args, evidence, events) {
+  if (args?.action === 'correct') {
+    if (Object.keys(args).sort().join(',') !== 'action,expectedRevision,quotes,targetRevision') throw new Error('阶段纠正申请格式无效')
+    return prepareStageCorrection({ graph, history, events, expectedRevision: args.expectedRevision, targetRevision: args.targetRevision, quotes: args.quotes }).history
+  }
+  const state = replayStageJournal(graph, history)
+  const entry = validateJournalTransition(graph, state, args, evidence, events)
+  return replayStageJournal(graph, [...history, entry]).history
+}
+
+function validateJournalTransition(graph, state, args, evidence, events) {
+  if (!args || Object.keys(args).sort().join(',') !== 'expectedRevision,quotes,transition') throw new Error('阶段申请格式无效')
+  return validateTransition(graph, state, { transition: args.transition, expectedRevision: args.expectedRevision, evidence }, events)
+}
+
+export function verifyStageJournalToolHistory(log, graph, stages, config = null, character = []) {
+  const actual = deriveStageJournalToolHistory(log, graph, config)
+  if (JSON.stringify(actual.stages) !== JSON.stringify(stages) || JSON.stringify(actual.character) !== JSON.stringify(character)) throw new Error('跑团工具记录与保存状态不一致')
+  return true
+}
+
+// Recovery audit only: admit a transcript if either outcome of exactly one
+// interrupted call can explain subsequent calls. It never returns a guessed
+// state; callers must persist suspension and keep both tools disabled.
+export function validateAmbiguousStageJournalRecovery(log, graph, config = null) {
+  let stages = [[]], characters = [[]], unknownCount = 0
+  const next = (histories, advance) => {
+    const possible = histories.flatMap(history => { try { return [advance(history)] } catch { return [] } })
+    if (!possible.length) throw new Error('中断后的工具记录无法核对')
+    return possible
+  }
+  const uncertain = (histories, advance, mixedText) => {
+    if (++unknownCount > 1) throw new Error('存在多个未确认工具结果')
+    return mixedText ? histories : [...histories, ...histories.flatMap(history => { try { return [advance(history)] } catch { return [] } })]
+  }
+  const stageAdvance = item => history => advanceStageJournal(graph, history, item.args, item.evidence ?? resolveEvidenceQuotes(item.args?.quotes, item.events), item.events)
+  const characterAdvance = item => history => advanceCharacterState(config, history, item.args, item.events).history
+  scanStageToolHistory(log,
+    item => { stages = next(stages, stageAdvance(item)) },
+    item => { stages = uncertain(stages, stageAdvance(item), item.mixedText) },
+    config ? item => { characters = next(characters, characterAdvance(item)) } : null,
+    config ? item => { characters = uncertain(characters, characterAdvance(item), item.mixedText) } : null)
+  if (unknownCount !== 1) throw new Error('缺少可核对的未确认工具结果')
+  return true
+}
+
 // Validate only the structurally confirmed dual-tool history when tracking has
 // already been suspended. Unknown outcomes are never promoted to successes.
 export function deriveCombinedToolHistory(log, graph, config, onUnknown = () => {}) {
@@ -131,8 +191,9 @@ export function verifyCombinedToolHistory(log, graph, stageHistory, config, char
 
 // Present only the exact quotations from successful, verified tool calls.
 // Do not expose other message blocks, model reasoning or unconfirmed writes.
-export function characterSourceQuotes(log, graph, stageHistory, config, characterHistory) {
-  verifyCombinedToolHistory(log, graph, stageHistory, config, characterHistory)
+export function characterSourceQuotes(log, graph, stageHistory, config, characterHistory, { allowCorrections = false } = {}) {
+  if (allowCorrections) verifyStageJournalToolHistory(log, graph, stageHistory, config, characterHistory)
+  else verifyCombinedToolHistory(log, graph, stageHistory, config, characterHistory)
   const latest = new Map()
   scanStageToolHistory(log, () => {}, () => { throw new Error('阶段工具结果不确定，不能展示依据') }, ({ args, events }) => {
     latest.set(args.field, args.quotes.map(quote => {
