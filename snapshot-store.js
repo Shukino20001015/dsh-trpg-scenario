@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { parsePublicCriteria, parseScoreBands } from './scenario-store.js'
 import { parseStageGraph } from './stage-graph.js'
 import { parseCharacterConfig } from './character-state.js'
+import { openRegularRead } from './safe-read.js'
 
 // Snapshots may contain GM-only material. They are local, private, immutable
 // and content-addressed by the existing opening/version hash. Never trust the
@@ -57,7 +58,7 @@ async function snapshotDir(root, create = false) {
 export async function readSnapshot(root, hash) {
   if (!validHash(hash)) throw new Error('快照标识无效。')
   const dir = await snapshotDir(root)
-  const file = await open(join(dir, `${hash}.json`), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  const file = await openRegularRead(join(dir, `${hash}.json`))
   try {
     const info = await file.stat()
     if (!info.isFile() || info.size > MAX_BYTES) throw new Error('快照大小或类型无效。')

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { advanceStage, restoreStageState, validateTransition } from './stage-graph.js'
 import { prepareStageCorrection, replayStageJournal } from './stage-correction.mjs'
+import { openRegularRead } from './safe-read.js'
 
 const validSession = value => typeof value === 'string' && /^session-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value)
 const validHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
@@ -25,7 +26,7 @@ async function stageDirectory(root, session, hash, create = false) {
 }
 
 async function readJson(path) {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  const file = await openRegularRead(path)
   try {
     const info = await file.stat()
     if (!info.isFile() || info.size > MAX_ENTRY_BYTES) throw new Error('阶段记录文件无效')

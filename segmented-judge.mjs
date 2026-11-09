@@ -64,10 +64,10 @@ export async function collectEvidence(segments, extract, { signal, expectedRecor
     onProgress?.({ phase: 'extract', completed: collected.length, total: segments.length })
     if (signal?.aborted) return { status: 'incomplete', completed: collected.length, total: segments.length, reason: 'aborted' }
     const records = new Map(segment.records.map(record => [record.ref, record]))
-    let evidence, reason = 'extract-failed'
+    let evidence, reason = 'extract-failed', retryIssue
     for (let attempt = 1; attempt <= 2; attempt++) {
       let response
-      try { response = await extract({ ...structuredClone(segment), ...(attempt > 1 ? { retry: true } : {}) }, signal) }
+      try { response = await extract({ ...structuredClone(segment), ...(attempt > 1 ? { retry: true, retryIssue } : {}) }, signal) }
       catch (error) { response = null; reason = error instanceof SegmentExtractionFailure && ['timeout', 'output-limit', 'model-truncated', 'stream-incomplete', 'invalid-response'].includes(error.reason) ? error.reason : 'extract-failed' }
       if (signal?.aborted) return { status: 'incomplete', completed: collected.length, total: segments.length, reason: 'aborted' }
       if (response) {
@@ -76,7 +76,13 @@ export async function collectEvidence(segments, extract, { signal, expectedRecor
           const validated = []
           for (const item of response.evidence) {
             const record = records.get(item?.ref)
-            if (!record || typeof item.quote !== 'string' || !item.quote.trim() || item.quote.length > 500 || !record.text.includes(item.quote)) { reason = 'invalid-evidence'; break }
+            if (!record || typeof item.quote !== 'string' || !item.quote.trim() || item.quote.length > 500 || !record.text.includes(item.quote)) {
+              reason = 'invalid-evidence'
+              // Pass only a trusted, existing record identifier. Never echo an
+              // invalid model-generated quote or an invented identifier.
+              retryIssue = record ? { ref: record.ref } : { unknownRef: true }
+              break
+            }
             validated.push({ ref: record.ref, role: record.role, quote: item.quote })
           }
           if (validated.length === response.evidence.length) { evidence = validated; break }

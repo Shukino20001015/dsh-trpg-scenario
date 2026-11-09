@@ -57,7 +57,14 @@ export async function reviewAllDimensions({ inspected, extracted, dimensions, co
       }).then(value => ({ value })), aborted])
       if (result.aborted) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: signal?.aborted ? 'aborted' : 'timeout' }
       response = result.value
-    } catch (error) { return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: signal?.aborted ? 'aborted' : error instanceof GlobalReviewFailure && ['timeout', 'output-limit', 'model-truncated', 'stream-incomplete'].includes(error.reason) ? error.reason : 'review-failed' } }
+    } catch (error) {
+      const failure = signal?.aborted ? 'aborted' : error instanceof GlobalReviewFailure && ['timeout', 'output-limit', 'model-truncated', 'stream-incomplete', 'stream-invalid'].includes(error.reason) ? error.reason : 'review-failed'
+      if (failure === 'stream-invalid' && attempt < 2 && typeof consumeRetry === 'function' && consumeRetry()) {
+        onProgress?.({ phase: 'review', completed: results.length, total: dimensions.length, retry: true })
+        continue
+      }
+      return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: failure }
+    }
     finally { clearTimeout(timer); signal?.removeEventListener('abort', onAbort) }
     if (signal?.aborted) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: 'aborted' }
     reason = undefined

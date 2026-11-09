@@ -1,5 +1,5 @@
-import { lstat, open, readFile, stat } from 'node:fs/promises'
-import { constants } from 'node:fs'
+import { lstat, readFile, stat } from 'node:fs/promises'
+import { openRegularRead } from './safe-read.js'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -18,8 +18,9 @@ import { parseCharacterConfig, publicCharacterState } from './character-state.js
 import { readCharacterState } from './character-store.js'
 import { CHARACTER_RULES, characterProtocolSupported, createCharacterRuntime } from './character-tool.js'
 import { runSegmentedPipeline } from './segmented-pipeline.mjs'
+import { scoringFileFingerprint } from './scoring-fingerprint.js'
 import { readSessionEvents } from './session-history.js'
-import { startSegmentedJob, finishSegmentedJob, readSegmentedJob, listSegmentedJobIds, safeJobLabel } from './segmented-job-store.js'
+import { startSegmentedJob, finishSegmentedJob, readSegmentedJob, listSegmentedJobIds, safeJobLabel, segmentedJobVersion } from './segmented-job-store.js'
 import { reviewStageTransition } from './stage-semantic-review.mjs'
 import { makeStageReviewModel, makeStageCorrectionReviewModel, makeStageExtractModel, makeCharacterReviewModel, makeCharacterExtractModel } from './stage-review-llm.mjs'
 import { createStageAutoBackground } from './stage-auto-background.mjs'
@@ -256,7 +257,7 @@ export function apply(ctx, config = {}) {
     const info = await lstat(dir)
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('剧本目录不合法。')
     const readInstalled = async name => {
-      const file = await open(join(dir, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      const file = await openRegularRead(join(dir, name))
       try {
         const metadata = await file.stat(), limit = 1024 * 1024
         if (!metadata.isFile() || metadata.size > limit) throw new Error('剧本文件无效或过大。')
@@ -700,7 +701,7 @@ export function apply(ctx, config = {}) {
           if (params.get('jobs') === '1') {
             const ids = await listSegmentedJobIds(root)
             const jobs = await Promise.all(ids.map(async session => {
-              try { const job = await getSegmentedJob(session); return { session, status: job?.status || 'unavailable', ...(job?.label ? { label: job.label } : {}) } }
+              try { const job = await getSegmentedJob(session); return { session, status: job?.status || 'unavailable', ...(job?.label ? { label: job.label } : {}), ...(segmentedJobVersion(job) || {}) } }
               catch { return { session, status: 'unavailable' } }
             }))
             return Response.json({ jobs }, { headers })
@@ -830,11 +831,12 @@ export function apply(ctx, config = {}) {
     if (sessionId && segmentedProgress.has(sessionId)) return err('当前会话已有分段评分进行中。')
     if (sessionId) segmentedProgress.set(sessionId, { phase: 'prepare', completed: 0, total: 0 })
     try {
+      const filesBefore = await scoringFileFingerprint().catch(() => null)
       const buffer = bufferOverride || await readAttachment(attachments[0], 40 * 1024 * 1024, signal)
       const result = await runSegmentedPipeline({ root, buffer, llm: ctx.llm, provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort, allowUncertainMixed: true, signal, onProgress: progress => { if (sessionId) segmentedProgress.set(sessionId, progress) }, loadInstalledSnapshot: async id => frozenSnapshot(await loadScenario(join(root, id)), config.experimentalStageCorrection === true) })
       if (result.status !== 'human-review-required') {
         const phases = { prepare: '准备', extract: '分段提取', 'global-review': '逐维复核' }
-        const reasons = { 'call-budget': '所需调用超过本次上限', 'global-input-limit': '完整复核输入超过上限', 'extract-failed': '分段模型接口调用失败', 'invalid-response': '模型输出格式无法核验', 'invalid-evidence': '候选引文不能与对应记录逐字匹配', 'review-failed': '模型接口调用失败', 'model-truncated': '模型达到输出上限，内容被截断', 'output-limit': '模型输出超过本插件长度上限', 'stream-incomplete': '模型输出流未完整结束', 'invalid-review': '复核内容或引文无法核验', 'invalid-score': '分数、档位或引用不符合规则', timeout: '模型调用超时', aborted: '任务已中止' }
+        const reasons = { 'call-budget': '所需调用超过本次上限', 'global-input-limit': '完整复核输入超过上限', 'extract-failed': '分段模型调用或输出流处理失败', 'invalid-response': '模型输出格式无法核验', 'invalid-evidence': '候选引文不能与对应记录逐字匹配', 'review-failed': '模型调用或输出流处理失败', 'model-truncated': '模型达到输出上限，内容被截断', 'output-limit': '模型输出超过本插件长度上限', 'stream-incomplete': '模型输出流未完整结束', 'stream-invalid': '模型输出流格式不一致', 'invalid-review': '复核内容或引文无法核验', 'invalid-score': '分数、档位或引用不符合规则', timeout: '模型调用超时', aborted: '任务已中止' }
         const count = Number.isSafeInteger(result.completed) && Number.isSafeInteger(result.total) ? `；已完成 ${result.completed}/${result.total}` : ''
         return err(`分段评分未完成，不生成部分成绩。阶段：${phases[result.phase] || '未知'}${count}；原因：${reasons[result.reason] || '结果无法核验'}。请保留完整日志并检查模型或版本后重试。`)
       }
@@ -843,7 +845,9 @@ export function apply(ctx, config = {}) {
         d.rationale,
         ...d.quotations.map(q => `${q.ref}（${q.role === 'player' ? '玩家' : '主持'}）：${JSON.stringify(q.quote)}`),
       ].join('\n'))
-      return ok([`分段评分草稿，必须人工复核（剧本 ${result.scenarioId}；版本 ${result.versionHash}；${result.recordCount} 条记录、${result.segmentCount} 段）。`, '组织者专用：草稿可能包含玩家尚未遇到的人物、剧情或隐藏规则，未经审阅请勿向玩家分享。', `版本依据：${result.versionSource === 'local-snapshot' ? '本机原局快照' : '与原局摘要匹配的已安装版本'}；摘要不能证明日志真实性。`, ...result.caveats, result.warning, ...lines, `总分：${result.total === null ? '未计算' : result.total + '（待人工复核）'}`, '请对照完整原始记录检查引文是否支持理由、档位是否适用，以及是否遗漏反证；模型输出不是最终成绩。'].join('\n\n'))
+      const filesAfter = await scoringFileFingerprint().catch(() => null)
+      const filesHash = filesBefore && filesBefore === filesAfter ? filesBefore : null
+      return ok([`分段评分草稿，必须人工复核（剧本 ${result.scenarioId}；版本 ${result.versionHash}；${result.recordCount} 条记录、${result.segmentCount} 段）。`, `评分插件文件摘要：${filesHash || '无法核对'}。`, '组织者专用：草稿可能包含玩家尚未遇到的人物、剧情或隐藏规则，未经审阅请勿向玩家分享。', `版本依据：${result.versionSource === 'local-snapshot' ? '本机原局快照' : '与原局摘要匹配的已安装版本'}；摘要不能证明日志真实性。`, ...result.caveats, result.warning, ...lines, `总分：${result.total === null ? '未计算' : result.total + '（待人工复核）'}`, '请对照完整原始记录检查引文是否支持理由、档位是否适用，以及是否遗漏反证；模型输出不是最终成绩。'].join('\n\n'))
     } catch (e) { return err(`分段评分准备失败：${e.message}`) }
     finally { if (sessionId) segmentedProgress.delete(sessionId) }
   }

@@ -1,6 +1,6 @@
 {
   "name": "dsh-trpg-scenario",
-  "version": "0.2.1-test.93",
+  "version": "0.2.1-test.94",
   "description": "AI 跑团剧本加载器：导入剧本包、开局、评分",
   "type": "module",
   "exports": {
@@ -11,6 +11,8 @@
   },
   "files": [
     "index.js",
+    "scoring-fingerprint.js",
+    "safe-read.js",
     "scenario-store.js",
     "session-history.js",
     "snapshot-store.js",

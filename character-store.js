@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readdir, link, unlink } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { advanceCharacterState, restoreCharacterState } from './character-state.js'
+import { openRegularRead } from './safe-read.js'
 
 const SESSION = /^session-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const HASH = /^[a-f0-9]{64}$/
@@ -27,7 +28,7 @@ async function characterDirectory(root, session, hash, create = false) {
 }
 
 async function readJson(path) {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  const file = await openRegularRead(path)
   try {
     const info = await file.stat()
     if (!info.isFile() || info.size > MAX_ENTRY_BYTES) throw new Error('主角状态文件无效')

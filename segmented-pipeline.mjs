@@ -18,6 +18,23 @@ export function possiblePlayerCorrections(records) {
   return refs
 }
 
+// This is a narrow review aid, not a spoiler filter. Only flag quoted text
+// appearing in hidden judge materials but not in any known public source.
+export function dimensionsWithUnseenQuotedMaterial(dimensions, context, records) {
+  if (!Array.isArray(dimensions) || !context || !Array.isArray(records)) throw new Error('缺少报告或对话')
+  const visible = [context.opening, context.player, context.goal, ...records.filter(r => r?.role === 'player' || r?.role === 'host').map(r => r.text)].filter(v => typeof v === 'string')
+  const hidden = [context.setting, context.judge, ...dimensions.map(d => d.rubric)].filter(v => typeof v === 'string')
+  return dimensions.filter(d => {
+    if (typeof d?.rationale !== 'string') return false
+    const quotes = d.rationale.matchAll(/“([^”\n]{4,200})”|「([^」\n]{4,200})」|"([^"\n]{4,200})"/gu)
+    for (const match of quotes) {
+      const quote = match[1] || match[2] || match[3]
+      if (hidden.some(text => text.includes(quote)) && !visible.some(text => text.includes(quote))) return true
+    }
+    return false
+  }).map(d => d.name)
+}
+
 export async function runSegmentedPipeline({ root, buffer, llm, provider, model, reasoningEffort, loadInstalledSnapshot, allowUncertainMixed = false, signal, onProgress, segmentChars = 6000, maxCalls = 100, timeoutMs = 120000, maxInputChars = 500000 }) {
   if (!Number.isSafeInteger(maxCalls) || maxCalls < 1 || maxCalls > 200) throw new Error('模型调用上限无效')
   const prepared = await prepareFrozenSegmentReview({ root, buffer, loadInstalledSnapshot, allowUncertainMixed })
@@ -35,5 +52,7 @@ export async function runSegmentedPipeline({ root, buffer, llm, provider, model,
   if (indexed.status !== 'ready-for-global-review') return { status: 'incomplete', phase: 'extract', reason: indexed.reason, completed: indexed.completed, total: indexed.total }
   const result = await reviewAllDimensions({ inspected: prepared.inspected, extracted: indexed, dimensions: prepared.dimensions, context: prepared.context, review, signal, onProgress, consumeRetry, timeoutMs })
   if (result.status !== 'human-review-required') return { ...result, phase: 'global-review' }
+  const riskDimensions = dimensionsWithUnseenQuotedMaterial(result.dimensions.map(d => ({ ...d, rubric: prepared.dimensions.find(p => p.name === d.name)?.rubric })), prepared.context, records)
+  if (riskDimensions.length) prepared.context.caveats.push(`可能涉及未公开剧本内容的引文：${riskDimensions.join('、')}。请组织者核对后再分享；文字匹配可能误报或漏报，未提示不代表没有剧透。`)
   return { ...result, scenarioId: prepared.scenarioId, versionHash: prepared.versionHash, versionSource: prepared.versionSource, recordCount: prepared.inspected.recordIds.length, segmentCount: segments.length, caveats: prepared.context.caveats }
 }

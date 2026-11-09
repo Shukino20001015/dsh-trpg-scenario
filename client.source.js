@@ -567,9 +567,10 @@ window.__ModuleLoader__.load({
         h('div', { style: styles.hint }, '可一次选择最多 6 份日志，每份独立创建任务并多次调用当前所选模型；会发送完整对话和评委所需剧本内容，可能增加耗时和费用。需各局原局快照或摘要完全匹配的已安装版本。草稿仅供组织者审阅，可能泄露未公开剧情；需人工逐项复核并核对版本，不自动比较或排名。'),
         segmentedJobs.length ? h('details', { style: { marginTop: 10, fontSize: 13 } },
           h('summary', { style: { cursor: 'pointer' } }, '组织者：分段评分任务'),
-          h('div', { style: styles.hint }, '任务只供组织者查看；编号用于区分不同评分会话。'),
+          h('div', { style: styles.hint }, '任务只供组织者查看；剧本与评分插件文件摘要可辅助核对，同摘要不证明实际运行代码、模型、记录完整性或结果可比。'),
           ...segmentedJobs.map(job => h('div', { key: job.session, style: { marginTop: 6 } },
-            h('button', { type: 'button', style: btn, onClick: () => ctx.uiWorkspace.openSession(job.session) }, `${job.label || '未命名日志'} · 任务 ${job.session.slice(-8)} · ${({ running: '进行中', complete: '已完成', failed: '未完成', interrupted: '需检查', unavailable: '不可读取' })[job.status] || '未知'}`)))) : null,
+            h('button', { type: 'button', style: btn, onClick: () => ctx.uiWorkspace.openSession(job.session) }, `${job.label || '未命名日志'} · 任务 ${job.session.slice(-8)} · ${({ running: '进行中', complete: '已完成', failed: '未完成', interrupted: '需检查', unavailable: '不可读取' })[job.status] || '未知'}`),
+            job.status === 'complete' ? h('div', { style: { ...styles.hint, wordBreak: 'break-all' } }, job.scenarioId && job.versionHash ? `剧本 ${job.scenarioId} · 版本 ${job.versionHash}\n评分插件文件 ${job.scoringFilesHash || '无法核对（旧报告或文件不可用）'}` : '版本未能识别，请打开报告核对。') : null))) : null,
         h('div', { style: styles.hint }, '每份日志对应一次游玩，可上传一份单独评分，也可上传多份进行比较（最多 6 份）。开局与评分分别创建独立会话，沿用当前会话所选模型。评分前请检查日志中的个人信息；AI 评分可能误用证据或给出不合理分数，须对照原始记录和评分标准复核。'),
         // The card can be taller than its scroll viewport; keep errors and
         // results visible after file upload even when the user is near the top.

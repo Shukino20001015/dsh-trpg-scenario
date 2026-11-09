@@ -19,7 +19,10 @@ export function makeSegmentExtractor({ llm, provider, model, reasoningEffort, cr
       if (controller.signal.aborted) throw new Error('中止')
       // Explicit fields only; never send paths, hidden metadata or tool output.
       const payload = { dimensions: frozenCriteria, records: segment.records.map(({ ref, role, text }) => ({ ref, role, text })) }
-      const system = segment.retry === true ? `${POLICY}\n上次结果未通过格式或逐字校验。重新从当前记录复制连续原文，不要改写、补字、合并片段或使用其他记录的编号；没有可准确复制的候选时返回空数组。` : POLICY
+      const issue = segment.retryIssue && /^记录 \d+$/.test(segment.retryIssue.ref || '') && segment.records.some(r => r.ref === segment.retryIssue.ref)
+        ? `其中 ${segment.retryIssue.ref} 的候选未能通过逐字校验；请重新核对该记录，不确定时省略该候选。`
+        : segment.retryIssue?.unknownRef === true ? '至少一个候选的记录编号不在当前片段中，请只使用本片段已有编号。' : ''
+      const system = segment.retry === true ? `${POLICY}\n上次结果未通过格式或逐字校验。${issue}重新从当前记录复制连续原文，不要改写、补字、合并片段或使用其他记录的编号；没有可准确复制的候选时返回空数组。` : POLICY
       const stream = llm.stream({ provider, model, ...(reasoningEffort ? { reasoningEffort } : {}), system, messages: [{ role: 'user', content: [{ type: 'text', text: JSON.stringify(payload) }] }], temperature: 0, maxTokens, signal: controller.signal })
       iterator = stream[Symbol.asyncIterator]()
       const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve({ aborted: true }), { once: true }))
