@@ -28,6 +28,8 @@ export async function prepareFrozenSegmentReview({ root, buffer, loadInstalledSn
   if (inspected.scenarioId !== reference.id || inspected.versionHash !== reference.hash || inspected.playPolicy !== snapshotPolicy(sc, continuity)) throw new Error('日志与快照的开局版本或游玩规则不一致')
   const dimensions = sc.criteria.map(criterion => ({ name: criterion.name, rubric: sc.rubric, bands: structuredClone(sc.scoreBands.find(item => item.name === criterion.name).bands) }))
   const caveats = ['日志完整性未经系统证明；不要仅凭自然结尾或编号跳号判断完整或截断。']
+  if (inspected.internalStageAutoSeqs.length) caveats.push(`记录 ${inspected.internalStageAutoSeqs.join('、')} 为后台阶段候选，不是玩家发言，也不能证明剧情事实；记录来源未经认证，请组织者核对原始日志。`)
+  if (inspected.internalCharacterAutoSeqs.length) caveats.push(`记录 ${inspected.internalCharacterAutoSeqs.join('、')} 为后台角色状态候选，不是玩家发言，也不能证明剧情事实；记录来源未经认证，请组织者核对原始日志。`)
   if (inspected.uncertainMixedSeqs.length) caveats.push(`记录 ${inspected.uncertainMixedSeqs.join('、')} 的主持文本与工具调用混合，是否向玩家展示未知；不得视为玩家已知事实或作为评分依据，必须人工核对。`)
   if (inspected.abortedTurnRanges.length) caveats.push(`以下游玩回合中止：${inspected.abortedTurnRanges.map(({ turn, start, end }) => `第 ${turn} 轮${start === undefined ? '（事件范围未知）' : `（原始事件 seq ${start}–${end}）`}`).join('、')}。轮次不是对话记录编号，事件范围包含非对话事件。`)
   if (inspected.interruptedAssistantSeqs.length) caveats.push(`主持回复在记录 ${inspected.interruptedAssistantSeqs.join('、')} 标记中断，不能视为完整回复。`)

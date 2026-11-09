@@ -1,4 +1,4 @@
-import { stageDialogueEvidence, resolveEvidenceQuotes } from './stage-graph.js'
+import { stageDialogueEvidence, resolveEvidenceQuotes, validateTransition } from './stage-graph.js'
 import { initializeStageState, readStageState, commitStageTransition } from './stage-store.js'
 
 // Construct a scoped runtime only for a frozen staged scenario. This module is
@@ -7,9 +7,33 @@ import { initializeStageState, readStageState, commitStageTransition } from './s
 export const STAGE_RULES = '【阶段运行规则】总体目标与阶段网络仅用于主持；不要泄露未来阶段、隐藏条件或引导玩家决策。当前阶段以程序确认状态为准。每次回复前，先检查当前阶段可用的每条转换条件：若本局已显示的对话明确证明某条条件全部成立，必须先调用 trpg_transition，再继续叙事；不得只在心里更新阶段或跳过申请。quotes 引用一条足以体现关键事实的原文连续片段，必要时才增加引用；每条为 8–200 字，必须逐字复制本局已经显示的玩家或主持对话，不能改写、省略中间内容、引用未输出的想法或只写人名。意向、猜测、未兑现的承诺都不等于结果，证据不充分就不要调用或声称切换。若条件是在你本次回复中才发生，先自然叙述使其成为对话事实，在下一次回复前检查并申请。转换失败时根据工具反馈核对，同一回合最多重新申请一次；不要伪称已切换，不要中断游戏或要求玩家处理，根据已有对话自然继续。调用工具的同一条消息不要包含任何叙述文字；先单独调用工具，收到结果后再用普通回复自然回应玩家。'
 export const STAGE_CONTRACT = 'trpg-stage-tool-v1'
 
-export async function createStageRuntime({ root, hash, graph, agent, resume = false, rules = STAGE_RULES }) {
+async function runStageReview(review, input, signal, timeoutMs) {
+  const controller = new AbortController()
+  const cancel = () => controller.abort()
+  if (signal?.aborted) controller.abort()
+  else signal?.addEventListener('abort', cancel, { once: true })
+  const timer = setTimeout(cancel, timeoutMs)
+  try {
+    if (controller.signal.aborted) throw new Error('阶段审核已中止')
+    const cancelled = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve({ cancelled:true }), { once:true }))
+    const result = await Promise.race([
+      Promise.resolve().then(() => controller.signal.aborted ? undefined : review(input, controller.signal)).then(value => ({ value })),
+      cancelled,
+    ])
+    if (result.cancelled || controller.signal.aborted) throw new Error('阶段审核未完成')
+    return result.value
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', cancel)
+    controller.abort()
+  }
+}
+
+export async function createStageRuntime({ root, hash, graph, agent, resume = false, rules = STAGE_RULES, reviewTransition = null, reviewTimeoutMs = 15000 }) {
   const session = agent?.session?.id
   if (!agent?.session || !Array.isArray(agent.session.log)) throw new Error('无法识别跑团会话')
+  if (reviewTransition !== null && typeof reviewTransition !== 'function') throw new Error('阶段审核配置无效')
+  if (!Number.isSafeInteger(reviewTimeoutMs) || reviewTimeoutMs < 1 || reviewTimeoutMs > 120000) throw new Error('阶段审核超时配置无效')
   let state = resume ? await readStageState(root, session, hash, graph) : await initializeStageState(root, session, hash, graph)
   const prompt = () => [
     rules,
@@ -36,9 +60,20 @@ export async function createStageRuntime({ root, hash, graph, agent, resume = fa
         const latestAssistant = [...agent.session.log].reverse().find(event => event?.type === 'assistant/message')
         const blocks = latestAssistant?.data?.message?.content
         if (Array.isArray(blocks) && blocks.some(block => block?.type === 'tool-call') && blocks.some(block => block?.type === 'text' && typeof block.text === 'string' && block.text.trim())) throw new Error('工具调用混合隐藏叙述')
+        const request = structuredClone(args)
         const events = stageDialogueEvidence(agent.session.log)
-        const evidence = resolveEvidenceQuotes(args.quotes, events)
-        state = await commitStageTransition(root, session, hash, graph, { transition: args.transition, expectedRevision: args.expectedRevision, evidence }, events, exec.signal)
+        const evidence = resolveEvidenceQuotes(request.quotes, events)
+        if (reviewTransition) {
+          const before = await readStageState(root, session, hash, graph)
+          const entry = validateTransition(graph, before, { transition: request.transition, expectedRevision: request.expectedRevision, evidence }, events)
+          const verdict = await runStageReview(reviewTransition, { graph: structuredClone(graph), state: structuredClone(before), events: structuredClone(events), request: structuredClone(request) }, exec?.signal, reviewTimeoutMs)
+          if (exec?.signal?.aborted || verdict?.status !== 'candidate' || JSON.stringify(verdict.request) !== JSON.stringify(request) || JSON.stringify(verdict.evidence) !== JSON.stringify(evidence)) throw new Error('阶段审核未通过')
+          // The reviewer saw a snapshot. If the visible dialogue changed while
+          // it ran, its verdict is stale, even if the original quote survives.
+          if (JSON.stringify(stageDialogueEvidence(agent.session.log)) !== JSON.stringify(events)) throw new Error('阶段审核期间对话已变化')
+          if (entry.revision !== before.revision + 1) throw new Error('阶段审核版本无效')
+        }
+        state = await commitStageTransition(root, session, hash, graph, { transition: request.transition, expectedRevision: request.expectedRevision, evidence }, events, exec.signal)
         const current = graph.stages.find(stage => stage.id === state.current)
         return { ok: true, message: `已确认进入「${current.name}」，当前 revision ${state.revision}。继续正常叙事。` }
       } catch (error) {

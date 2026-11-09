@@ -49,7 +49,12 @@ export async function reviewAllDimensions({ inspected, extracted, dimensions, co
       if (signal?.aborted) controller.abort()
       const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve({ aborted: true }), { once: true }))
       if (controller.signal.aborted) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: 'aborted' }
-      const result = await Promise.race([Promise.resolve().then(() => review({ dimension: structuredClone(dimension), context: structuredClone(frozenContext), records: structuredClone(records), candidates: structuredClone(candidates), ...(attempt > 1 ? { retry: true } : {}) }, controller.signal)).then(value => ({ value })), aborted])
+      const result = await Promise.race([Promise.resolve().then(() => {
+        // The parent can abort after scheduling this microtask but before it
+        // starts. Avoid issuing a model request after cancellation.
+        if (controller.signal.aborted) return undefined
+        return review({ dimension: structuredClone(dimension), context: structuredClone(frozenContext), records: structuredClone(records), candidates: structuredClone(candidates), ...(attempt > 1 ? { retry: true } : {}) }, controller.signal)
+      }).then(value => ({ value })), aborted])
       if (result.aborted) return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: signal?.aborted ? 'aborted' : 'timeout' }
       response = result.value
     } catch (error) { return { status: 'incomplete', completed: results.length, total: dimensions.length, reason: signal?.aborted ? 'aborted' : error instanceof GlobalReviewFailure && ['timeout', 'output-limit', 'model-truncated', 'stream-incomplete'].includes(error.reason) ? error.reason : 'review-failed' } }
