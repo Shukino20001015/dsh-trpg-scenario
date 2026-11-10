@@ -6,8 +6,8 @@ function visible(events){
  let prev=-1
  return events.map(e=>{if(!Number.isSafeInteger(e?.seq)||e.seq<=prev||!['user','assistant'].includes(e.role)||typeof e.text!=='string'||!e.text.trim())throw Error('invalid history');prev=e.seq;return {seq:e.seq,role:e.role,text:e.text}})
 }
-export function createCharacterAutoBackground({extract,review,timeoutMs=90000,maxSessions=8}){
- if(typeof extract!=='function'||typeof review!=='function'||!Number.isSafeInteger(timeoutMs)||timeoutMs<1||timeoutMs>120000||!Number.isSafeInteger(maxSessions)||maxSessions<1||maxSessions>100)throw Error('invalid background settings')
+export function createCharacterAutoBackground({extract,review,timeoutMs=90000,readyTtlMs=1800000,maxSessions=8}){
+ if(typeof extract!=='function'||typeof review!=='function'||!Number.isSafeInteger(timeoutMs)||timeoutMs<1||timeoutMs>120000||!Number.isSafeInteger(readyTtlMs)||readyTtlMs<1||readyTtlMs>7200000||!Number.isSafeInteger(maxSessions)||maxSessions<1||maxSessions>100)throw Error('invalid background settings')
  const jobs=new Map();let closed=false
  function cancel(session){const job=jobs.get(session);if(!job)return false;jobs.delete(session);clearTimeout(job.timer);job.controller.abort();return true}
  function start({session,config,state,events}){
@@ -17,7 +17,7 @@ export function createCharacterAutoBackground({extract,review,timeoutMs=90000,ma
   jobs.set(session,job);job.timer=setTimeout(()=>cancel(session),timeoutMs)
   Promise.resolve().then(()=>{if(jobs.get(session)!==job||job.controller.signal.aborted)return;return discoverCharacterCandidate({...frozen,extract,review,signal:job.controller.signal,timeoutMs})}).then(result=>{
    if(jobs.get(session)!==job||job.controller.signal.aborted)return
-   job.status='ready';job.result=result;clearTimeout(job.timer);job.timer=setTimeout(()=>cancel(session),timeoutMs)
+   job.status='ready';job.result=result;clearTimeout(job.timer);job.timer=setTimeout(()=>cancel(session),readyTtlMs)
   }).catch(()=>{if(jobs.get(session)===job)cancel(session)})
   return true
  }

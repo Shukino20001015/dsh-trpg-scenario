@@ -10,8 +10,8 @@ function snapshot(events) {
 
 // Jobs are process-local and candidates never write state; restart deliberately
 // drops pending work. The consuming stage tool must re-review new dialogue.
-export function createStageAutoBackground({extract,review,timeoutMs=60000,maxSessions=8}) {
- if(typeof extract!=='function'||typeof review!=='function'||!Number.isSafeInteger(timeoutMs)||timeoutMs<1||timeoutMs>120000||!Number.isSafeInteger(maxSessions)||maxSessions<1||maxSessions>100) throw Error('invalid background settings')
+export function createStageAutoBackground({extract,review,timeoutMs=60000,readyTtlMs=1800000,maxSessions=8}) {
+ if(typeof extract!=='function'||typeof review!=='function'||!Number.isSafeInteger(timeoutMs)||timeoutMs<1||timeoutMs>120000||!Number.isSafeInteger(readyTtlMs)||readyTtlMs<1||readyTtlMs>7200000||!Number.isSafeInteger(maxSessions)||maxSessions<1||maxSessions>100) throw Error('invalid background settings')
  const jobs=new Map();let closed=false
  function cancel(session) {const job=jobs.get(session);if(!job)return false;jobs.delete(session);clearTimeout(job.timer);job.controller.abort();return true}
  function start({session,graph,state,events}) {
@@ -26,7 +26,7 @@ export function createStageAutoBackground({extract,review,timeoutMs=60000,maxSes
   }).then(result=>{
    if(jobs.get(session)!==job||job.controller.signal.aborted)return
    job.status='ready';job.result=result
-   clearTimeout(job.timer);job.timer=setTimeout(()=>cancel(session),timeoutMs)
+   clearTimeout(job.timer);job.timer=setTimeout(()=>cancel(session),readyTtlMs)
   }).catch(()=>{if(jobs.get(session)===job)cancel(session)})
   return true
  }
